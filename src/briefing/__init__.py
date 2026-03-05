@@ -1,0 +1,2 @@
+"""Briefing models and formatter."""
+
