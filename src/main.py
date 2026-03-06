@@ -68,6 +68,13 @@ async def post_shutdown(application: Application[Any, Any, Any, Any, Any, Any]) 
     logger.info("AlphaRadar shutdown complete")
 
 
+async def error_handler(update, context) -> None:
+    import traceback
+
+    print(f"ERROR: {context.error}")
+    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+
+
 def main() -> None:
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
@@ -92,6 +99,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(handle_asset_type_callback, pattern=r"^asset_type:")
     )
+    application.add_error_handler(error_handler)
 
     application.run_polling(allowed_updates=["message", "callback_query"])
 

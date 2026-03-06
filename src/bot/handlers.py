@@ -70,6 +70,7 @@ def _help_text() -> str:
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print(f"DEBUG: Received /start from chat_id={update.effective_chat.id}")
     if not await owner_only(update, context):
         return
     if update.message is None:
