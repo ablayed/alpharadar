@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import io
 import logging
 import logging.handlers
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+# Fix Windows console encoding for emoji support.
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Defaults
@@ -26,11 +33,14 @@ from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.storage.database import Database
 
+stream_handler = logging.StreamHandler(stream=sys.stdout)
+stream_handler.setLevel(logging.INFO)
+
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(),
+        stream_handler,
         logging.handlers.RotatingFileHandler(
             "logs/alpharadar.log",
             maxBytes=5_000_000,
