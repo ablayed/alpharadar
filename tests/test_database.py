@@ -3,6 +3,9 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
+from src.sentiment.analyzer import SentimentResult
+from src.sentiment.cache import SentimentCache
+
 
 @pytest.mark.asyncio
 async def test_watchlist_crud(db) -> None:
@@ -47,3 +50,25 @@ async def test_cache_expiry_logic(db) -> None:
     expired = await db.get_cached("cache:key")
     assert expired is None
 
+
+@pytest.mark.asyncio
+async def test_sentiment_cache_round_trip(db) -> None:
+    cache = SentimentCache(db)
+    headline = "NVIDIA reports record quarterly revenue of $35 billion"
+    result = SentimentResult(
+        label="positive",
+        score=0.82,
+        confidence=0.91,
+        positive=0.89,
+        negative=0.07,
+        neutral=0.04,
+    )
+
+    initial = await cache.get_cached([headline])
+    assert initial[headline] is None
+
+    await cache.store_results([headline], [result])
+
+    cached = await cache.get_cached([headline])
+    assert cached[headline] == result
+    assert await db.get_sentiment_cache_count() == 1

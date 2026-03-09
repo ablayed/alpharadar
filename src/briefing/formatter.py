@@ -7,9 +7,48 @@ from src.briefing.models import BriefingData
 from src.data.base import AssetPrice, DeFiProtocol, NewsItem
 
 
+def _sentiment_indicator(news_item: NewsItem) -> str:
+    """Return an emoji indicator based on sentiment score and confidence."""
+    if news_item.sentiment_label is None or news_item.sentiment_score is None:
+        return ""
+
+    score = news_item.sentiment_score
+    confidence = news_item.sentiment_confidence or 0.0
+
+    if score > 0.3 and confidence >= 0.7:
+        return "📈 "
+    if score < -0.3 and confidence >= 0.7:
+        return "📉 "
+    if abs(score) > 0.1:
+        return "📊 "
+    return ""
+
+
+def _sentiment_summary(news_items: list[NewsItem]) -> str:
+    """Compute a compact aggregate sentiment summary across the news set."""
+    positive = sum(1 for item in news_items if item.sentiment_label == "positive")
+    negative = sum(1 for item in news_items if item.sentiment_label == "negative")
+    neutral = sum(
+        1
+        for item in news_items
+        if item.sentiment_label == "neutral" or item.sentiment_label is None
+    )
+
+    parts: list[str] = []
+    if positive > 0:
+        parts.append(f"📈 {positive} pos")
+    if negative > 0:
+        parts.append(f"📉 {negative} neg")
+    if neutral > 0:
+        parts.append(f"{neutral} neu")
+
+    if not parts:
+        return ""
+    return "Sentiment: " + "  ".join(parts)
+
+
 class BriefingFormatter:
     def format_daily(self, data: BriefingData) -> str:
-        # Phase 2: Insert sentiment indicators (🟢🔴) next to each headline
         message = self._build_message(
             data=data,
             include_time=True,
@@ -37,7 +76,12 @@ class BriefingFormatter:
             include_trending=True,
             include_headlines=True,
         )
-        return self._enforce_length(data, message, include_time=False, weekend=data.is_weekend)
+        return self._enforce_length(
+            data,
+            message,
+            include_time=False,
+            weekend=data.is_weekend,
+        )
 
     def format_error(self, error_msg: str) -> str:
         escaped = self._escape(error_msg)
@@ -163,13 +207,18 @@ class BriefingFormatter:
                 if eth
                 else ""
             )
-            lines.append("  ".join(part for part in [btc_str, eth_str] if part))
+            lines.append("  ".join(part for part in (btc_str, eth_str) if part))
 
         if data.total_tvl is not None and data.tvl_change_24h_pct is not None:
             lines.append(
                 f"Crypto TVL: {self._format_large_currency(data.total_tvl)} "
                 f"{self._indicator(data.tvl_change_24h_pct)} {self._format_pct(data.tvl_change_24h_pct)}"
             )
+
+        summary = _sentiment_summary(data.news_items)
+        if summary:
+            lines.append(summary)
+
         return "\n".join(lines)
 
     def _format_stocks_section(
@@ -192,9 +241,12 @@ class BriefingFormatter:
                 f"({self._format_pct(item.change_24h_pct)})"
             )
             if include_headlines and abs(item.change_24h_pct) >= 1:
-                headline = self._headline_for_symbol(item.symbol, news_items)
-                if headline:
-                    line += f" - {self._truncate(self._escape(headline), 60)}"
+                news_item = self._news_for_symbol(item.symbol, news_items)
+                if news_item:
+                    line += (
+                        f" - {_sentiment_indicator(news_item)}"
+                        f"{self._truncate(self._escape(news_item.headline), 60)}"
+                    )
                 else:
                     line += " - No significant news"
             lines.append(line)
@@ -225,9 +277,7 @@ class BriefingFormatter:
         has_content = False
 
         for event in data.earnings_today[:5]:
-            lines.append(
-                f"📅 {self._escape(event.symbol)} earnings call ({self._escape(event.hour.lower())})"
-            )
+            lines.append(f"📅 {self._escape(event.symbol)} earnings call ({self._escape(event.hour.lower())})")
             has_content = True
 
         for filing in data.sec_filings[:5]:
@@ -258,10 +308,7 @@ class BriefingFormatter:
         entries: list[str] = []
         for idx, item in enumerate(trending[:5], start=1):
             symbol_obj = item.get("symbol")
-            if isinstance(symbol_obj, str):
-                symbol = symbol_obj.upper()
-            else:
-                symbol = "?"
+            symbol = symbol_obj.upper() if isinstance(symbol_obj, str) else "?"
             entries.append(f"#{idx} {self._escape(symbol)}")
         return "🔥 <b>TRENDING</b>\n" + "  ".join(entries)
 
@@ -273,24 +320,32 @@ class BriefingFormatter:
         selected = sorted_prices[:5]
         needed = {"BTC", "ETH"}
         selected_symbols = {item.symbol.upper() for item in selected}
-        remaining = [item for item in sorted_prices if item.symbol.upper() in needed and item.symbol.upper() not in selected_symbols]
+        remaining = [
+            item
+            for item in sorted_prices
+            if item.symbol.upper() in needed and item.symbol.upper() not in selected_symbols
+        ]
         for candidate in remaining:
             if len(selected) < 5:
                 selected.append(candidate)
                 continue
             replace_idx = next(
-                (i for i, item in reversed(list(enumerate(selected))) if item.symbol.upper() not in needed),
+                (
+                    idx
+                    for idx, item in reversed(list(enumerate(selected)))
+                    if item.symbol.upper() not in needed
+                ),
                 None,
             )
             if replace_idx is not None:
                 selected[replace_idx] = candidate
         return selected
 
-    def _headline_for_symbol(self, symbol: str, news_items: list[NewsItem]) -> str | None:
+    def _news_for_symbol(self, symbol: str, news_items: list[NewsItem]) -> NewsItem | None:
         upper = symbol.upper()
         for item in news_items:
             if upper in {related.upper() for related in item.related_symbols}:
-                return item.headline
+                return item
         return None
 
     @staticmethod
@@ -303,7 +358,9 @@ class BriefingFormatter:
             "sec_filings": "SEC filings temporarily unavailable",
             "trending": "Trending crypto temporarily unavailable",
             "index_prices": "Market snapshot temporarily unavailable",
+            "market_status": "Market status temporarily unavailable",
             "news": "News feed temporarily unavailable",
+            "coingecko_budget": "CoinGecko usage temporarily unavailable",
         }
         return [mapping[section] for section in failed_sections if section in mapping]
 

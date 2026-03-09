@@ -78,6 +78,19 @@ CREATE TABLE IF NOT EXISTS api_cache (
     cached_at TEXT NOT NULL DEFAULT (datetime('now')),
     ttl_seconds INTEGER NOT NULL DEFAULT 300
 );
+
+CREATE TABLE IF NOT EXISTS sentiment_cache (
+    headline_hash TEXT PRIMARY KEY,
+    headline_text TEXT NOT NULL,
+    label TEXT NOT NULL,
+    score REAL NOT NULL,
+    confidence REAL NOT NULL,
+    positive REAL NOT NULL,
+    negative REAL NOT NULL,
+    neutral REAL NOT NULL,
+    analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    model_version TEXT NOT NULL DEFAULT 'finbert-onnx-v1'
+);
 """
 
 
@@ -278,3 +291,10 @@ class Database:
                     (cache_key, response_json, ttl_seconds),
                 )
                 await conn.commit()
+
+    async def get_sentiment_cache_count(self) -> int:
+        async with aiosqlite.connect(self.db_path) as conn:
+            await self._configure_connection(conn)
+            cursor = await conn.execute("SELECT COUNT(*) FROM sentiment_cache")
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0

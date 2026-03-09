@@ -164,6 +164,7 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     application.bot_data["db"] = db
     application.bot_data["aggregator"] = aggregator
     application.bot_data["formatter"] = formatter
+    application.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
     application.bot_data["started_at"] = datetime.now(ZoneInfo(settings.timezone))
 
     logger.info("post_init: Setting up scheduler...")
@@ -239,6 +240,7 @@ def main() -> None:
         watchlist_command,
         add_command,
         remove_command,
+        sentiment_command,
         status_command,
         help_command,
         handle_asset_type_callback,
@@ -254,6 +256,7 @@ def main() -> None:
     application.add_handler(CommandHandler("watchlist", debug_wrap("watchlist_command", watchlist_command)))
     application.add_handler(CommandHandler("add", debug_wrap("add_command", add_command)))
     application.add_handler(CommandHandler("remove", debug_wrap("remove_command", remove_command)))
+    application.add_handler(CommandHandler("sentiment", debug_wrap("sentiment_command", sentiment_command)))
     application.add_handler(CommandHandler("status", debug_wrap("status_command", status_command)))
     application.add_handler(CommandHandler("help", debug_wrap("help_command", help_command)))
     application.add_handler(

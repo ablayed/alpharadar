@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -9,6 +10,7 @@ from telegram.ext import ContextTypes
 
 from src.config import settings
 from src.data.aggregator import DataAggregator
+from src.sentiment.analyzer import SentimentAnalyzer
 from src.storage.database import Database, WatchlistItem
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,7 @@ def _help_text() -> str:
         "/add AAPL  Add a stock to watchlist\n"
         "/add btc  Add a crypto to watchlist\n"
         "/remove TSLA  Remove from watchlist\n"
+        "/sentiment &lt;text&gt;  Analyze ad hoc sentiment\n"
         "/status  API usage and system health\n"
         "/help  Show this message"
     )
@@ -137,12 +140,12 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if not context.args:
-        await update.message.reply_text("Usage: /add <symbol>")
+        await update.message.reply_text("Usage: /add &lt;symbol&gt;")
         return
 
     raw_symbol = context.args[0].strip()
     if not raw_symbol:
-        await update.message.reply_text("Usage: /add <symbol>")
+        await update.message.reply_text("Usage: /add &lt;symbol&gt;")
         return
 
     symbol = raw_symbol.upper()
@@ -207,7 +210,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if not context.args:
-        await update.message.reply_text("Usage: /remove <symbol>")
+        await update.message.reply_text("Usage: /remove &lt;symbol&gt;")
         return
 
     symbol = context.args[0].strip().upper()
@@ -233,6 +236,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     cg_used, cg_limit = await aggregator.coingecko.get_remaining_budget()
     stocks = await db.get_watchlist("stock")
     crypto = await db.get_watchlist("crypto")
+    sentiment_cache_count = await db.get_sentiment_cache_count()
+    model_status = (
+        "Loaded (ONNX, CPU)"
+        if aggregator.sentiment_analyzer.is_available()
+        else "Not available"
+    )
     next_briefing = _next_briefing_text()
     uptime = _uptime_text(context)
 
@@ -242,12 +251,59 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"📡 CoinGecko: {_status_label(health['coingecko'])} "
         f"({cg_used:,}/{cg_limit:,} calls this month)\n"
         f"📡 DeFi Llama: {_status_label(health['defillama'])}\n"
-        f"📡 SEC EDGAR: {_status_label(health['edgar'])}\n\n"
+        f"📡 SEC EDGAR: {_status_label(health['edgar'])}\n"
+        f"🧠 FinBERT: {model_status}\n"
+        f"📊 Sentiment cache: {sentiment_cache_count:,} headlines cached\n\n"
         f"📋 Watchlist: {len(stocks)} stocks, {len(crypto)} crypto\n"
         f"📅 Next briefing: {next_briefing}\n"
         f"🕐 Uptime: {uptime}"
     )
     await update.message.reply_text(text)
+
+
+async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /sentiment &lt;text to analyze&gt;")
+        return
+
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Usage: /sentiment &lt;text to analyze&gt;")
+        return
+
+    msg = await update.message.reply_text("🧠 Analyzing...")
+    analyzer = _sentiment_analyzer_from_context(context)
+
+    try:
+        if not analyzer.is_available():
+            await analyzer.initialize()
+
+        results = await analyzer.analyze([text])
+        result = results[0]
+        indicator = (
+            "📈" if result.label == "positive" else "📉" if result.label == "negative" else "📊"
+        )
+        escaped_text = html.escape(text, quote=False)
+        response = (
+            "🧠 <b>Sentiment Analysis</b>\n\n"
+            f'"{escaped_text}"\n\n'
+            f"Label: {result.label} ({indicator})\n"
+            f"Score: {result.score:+.2f}\n"
+            f"Confidence: {result.confidence:.1%}\n\n"
+            "Breakdown:\n"
+            f"  Positive: {result.positive:.1%}\n"
+            f"  Negative: {result.negative:.1%}\n"
+            f"  Neutral: {result.neutral:.1%}"
+        )
+        await msg.edit_text(response)
+    except Exception as exc:
+        logger.exception("Sentiment command failed")
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"⚠️ Sentiment analysis failed.\n<i>{escaped_error[:250]}</i>")
 
 
 async def _add_stock(symbol: str, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -360,3 +416,12 @@ def _aggregator_from_context(context: ContextTypes.DEFAULT_TYPE) -> DataAggregat
     if not isinstance(aggregator, DataAggregator):
         raise RuntimeError("DataAggregator missing from bot_data")
     return aggregator
+
+
+def _sentiment_analyzer_from_context(context: ContextTypes.DEFAULT_TYPE) -> SentimentAnalyzer:
+    analyzer = context.bot_data.get("sentiment_analyzer")
+    if isinstance(analyzer, SentimentAnalyzer):
+        return analyzer
+    aggregator = _aggregator_from_context(context)
+    context.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
+    return aggregator.sentiment_analyzer

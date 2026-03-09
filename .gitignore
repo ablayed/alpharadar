@@ -9,7 +9,8 @@ __pycache__/
 .test_tmp/
 temp_write/
 pytest-cache-files-*/
-logs/
-data/
+/logs/
+/data/
+/models/
 dist/
 *.egg-info/

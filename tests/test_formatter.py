@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from src.briefing.formatter import BriefingFormatter
+from src.briefing.formatter import BriefingFormatter, _sentiment_indicator, _sentiment_summary
 from src.briefing.models import BriefingData
 from src.data.base import (
     AssetPrice,
@@ -38,6 +38,27 @@ def _make_asset(
     )
 
 
+def _make_news(
+    *,
+    headline: str,
+    symbol: str,
+    label: str | None,
+    score: float | None,
+    confidence: float | None,
+) -> NewsItem:
+    return NewsItem(
+        headline=headline,
+        summary="",
+        source="Test",
+        url="https://example.com",
+        published_at="2026-03-05T06:00:00+00:00",
+        related_symbols=[symbol],
+        sentiment_label=label,
+        sentiment_score=score,
+        sentiment_confidence=confidence,
+    )
+
+
 def _sample_data(is_weekend: bool) -> BriefingData:
     return BriefingData(
         generated_at=datetime(2026, 3, 5, 7, 0, tzinfo=UTC),
@@ -61,16 +82,37 @@ def _sample_data(is_weekend: bool) -> BriefingData:
             _make_asset("FET", AssetType.CRYPTO, 1.82, -3.1, -8.4),
         ],
         news_items=[
-            NewsItem(
+            _make_news(
                 headline="Datacenter revenue beat & guidance raise",
-                summary="",
-                source="Test",
-                url="https://example.com",
-                published_at="2026-03-05T06:00:00+00:00",
-                related_symbols=["NVDA"],
+                symbol="NVDA",
+                label="positive",
+                score=0.82,
+                confidence=0.91,
+            ),
+            _make_news(
+                headline="Vehicle recall pressures near-term margins",
+                symbol="TSLA",
+                label="negative",
+                score=-0.64,
+                confidence=0.88,
+            ),
+            _make_news(
+                headline="Apple scheduled to report earnings next Thursday",
+                symbol="AAPL",
+                label="neutral",
+                score=0.02,
+                confidence=0.61,
+            ),
+        ],
+        earnings_today=[
+            EarningsEvent(
+                symbol="NVDA",
+                date="2026-03-05",
+                hour="amc",
+                eps_estimate=0.85,
+                revenue_estimate=None,
             )
         ],
-        earnings_today=[EarningsEvent(symbol="NVDA", date="2026-03-05", hour="amc", eps_estimate=0.85, revenue_estimate=None)],
         sec_filings=[
             SECFiling(
                 company_name="Microsoft",
@@ -105,7 +147,7 @@ def _sample_data(is_weekend: bool) -> BriefingData:
     )
 
 
-def test_format_daily_contains_sections_and_html_escape() -> None:
+def test_format_daily_contains_sections_and_sentiment_markup() -> None:
     formatter = BriefingFormatter()
     data = _sample_data(is_weekend=False)
     text = formatter.format_daily(data)
@@ -114,7 +156,8 @@ def test_format_daily_contains_sections_and_html_escape() -> None:
     assert "<b>STOCKS</b>" in text
     assert "<b>CRYPTO</b>" in text
     assert "<b>CATALYSTS</b>" in text
-    assert "&amp;" in text
+    assert "📈 Datacenter revenue beat &amp; guidance raise" in text
+    assert "Sentiment: 📈 1 pos  📉 1 neg  1 neu" in text
     assert len(text) <= 4096
 
 
@@ -128,3 +171,48 @@ def test_format_weekend_excludes_stock_and_catalysts() -> None:
     assert "<b>DEFI MOVERS</b>" in text
     assert len(text) <= 4096
 
+
+def test_sentiment_indicator_thresholds() -> None:
+    positive = _make_news(
+        headline="Positive",
+        symbol="NVDA",
+        label="positive",
+        score=0.55,
+        confidence=0.82,
+    )
+    mixed = _make_news(
+        headline="Mixed",
+        symbol="AAPL",
+        label="positive",
+        score=0.18,
+        confidence=0.54,
+    )
+    neutral = _make_news(
+        headline="Neutral",
+        symbol="MSFT",
+        label="neutral",
+        score=0.03,
+        confidence=0.61,
+    )
+    negative = _make_news(
+        headline="Negative",
+        symbol="TSLA",
+        label="negative",
+        score=-0.51,
+        confidence=0.9,
+    )
+
+    assert _sentiment_indicator(positive) == "📈 "
+    assert _sentiment_indicator(mixed) == "📊 "
+    assert _sentiment_indicator(neutral) == ""
+    assert _sentiment_indicator(negative) == "📉 "
+
+
+def test_sentiment_summary_counts_missing_data_as_neutral() -> None:
+    news_items = [
+        _make_news(headline="One", symbol="NVDA", label="positive", score=0.8, confidence=0.9),
+        _make_news(headline="Two", symbol="TSLA", label="negative", score=-0.6, confidence=0.9),
+        _make_news(headline="Three", symbol="AAPL", label=None, score=None, confidence=None),
+    ]
+
+    assert _sentiment_summary(news_items) == "Sentiment: 📈 1 pos  📉 1 neg  1 neu"

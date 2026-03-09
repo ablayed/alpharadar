@@ -23,6 +23,7 @@ from src.bot.handlers import (
     handle_asset_type_callback,
     help_command,
     remove_command,
+    sentiment_command,
     start_command,
     status_command,
     watchlist_command,
@@ -65,6 +66,7 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     application.bot_data["db"] = db
     application.bot_data["aggregator"] = aggregator
     application.bot_data["formatter"] = formatter
+    application.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
     application.bot_data["started_at"] = datetime.now(ZoneInfo(settings.timezone))
 
     await setup_scheduler(application)
@@ -104,6 +106,7 @@ def main() -> None:
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("add", add_command))
     application.add_handler(CommandHandler("remove", remove_command))
+    application.add_handler(CommandHandler("sentiment", sentiment_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(

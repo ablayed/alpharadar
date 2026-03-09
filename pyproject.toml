@@ -17,6 +17,9 @@ dependencies = [
     "pydantic-settings>=2.13.0",
     "finnhub-python>=2.4.20",
     "edgartools>=4.3.0",
+    "optimum[onnxruntime]>=1.24.0",
+    "transformers>=4.47.0",
+    "tokenizers>=0.21.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +36,7 @@ include = ["src*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
@@ -42,4 +46,3 @@ target-version = "py312"
 python_version = "3.12"
 strict = true
 exclude = ["^tests/"]
-
