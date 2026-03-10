@@ -1,3 +1,7 @@
+"""
+FinBERT sentiment analysis using ONNX Runtime directly.
+No dependency on optimum or torch at inference time.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +10,8 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -22,22 +27,15 @@ class SentimentResult:
 
 
 class SentimentAnalyzer:
-    """
-    Lazy-loading FinBERT sentiment analysis via ONNX Runtime.
-
-    The model is stored on disk and loaded only for inference batches so the
-    bot stays within the VM's tight memory budget between briefings.
-    """
-
-    MODEL_ID = "ProsusAI/finbert"
+    MODEL_PATH = "/app/models/finbert-onnx"
     MODEL_FILENAME = "model.onnx"
     MODEL_VERSION = "finbert-onnx-v1"
+    LABELS = ["positive", "negative", "neutral"]
 
-    def __init__(self, model_path: Path | None = None, batch_size: int = 16) -> None:
+    def __init__(self, model_path: Path | None = None) -> None:
         self.model_path = model_path or self.default_model_path()
-        self.batch_size = batch_size
-        self._model: Any | None = None
-        self._tokenizer: Any | None = None
+        self._session = None
+        self._tokenizer = None
         self._loaded = False
 
     @classmethod
@@ -45,6 +43,11 @@ class SentimentAnalyzer:
         override = os.getenv("FINBERT_MODEL_PATH")
         if override:
             return Path(override)
+
+        app_model_path = Path(cls.MODEL_PATH)
+        if app_model_path.exists():
+            return app_model_path
+
         return Path(__file__).resolve().parents[2] / "models" / "finbert-onnx"
 
     @property
@@ -62,34 +65,13 @@ class SentimentAnalyzer:
             logger.info("FinBERT ONNX model found at %s", self.model_path)
             return
 
-        logger.info("FinBERT ONNX model not found. Downloading and exporting...")
-        logger.info("This may take a few minutes the first time it runs.")
-        self.model_path.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(self._export_model)
-        logger.info("FinBERT ONNX model saved to %s", self.model_path)
+        raise FileNotFoundError(
+            f"FinBERT ONNX model not found at {self.model_file}. "
+            "Export it on your laptop and upload to models/finbert-onnx/"
+        )
 
     def close(self) -> None:
         self._unload_model()
-
-    def _export_model(self) -> None:
-        try:
-            from optimum.onnxruntime import ORTModelForSequenceClassification
-            from transformers import AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "FinBERT export dependencies are unavailable. Bake the ONNX model into the Docker image "
-                "or install the export dependencies in the build environment."
-            ) from exc
-
-        model = ORTModelForSequenceClassification.from_pretrained(self.MODEL_ID, export=True)
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
-        try:
-            model.save_pretrained(self.model_path)
-            tokenizer.save_pretrained(self.model_path)
-        finally:
-            del model
-            del tokenizer
-            gc.collect()
 
     def _load_model(self) -> None:
         if self._loaded:
@@ -97,18 +79,27 @@ class SentimentAnalyzer:
         if not self.is_available():
             raise FileNotFoundError(
                 f"FinBERT ONNX model not found at {self.model_file}. "
-                "Build the Docker image with the baked model or run initialize() first."
+                "Export it on your laptop and upload to models/finbert-onnx/"
             )
 
         logger.info("Loading FinBERT ONNX model into memory...")
-        from optimum.onnxruntime import ORTModelForSequenceClassification
+
+        import onnxruntime as ort
         from transformers import AutoTokenizer
 
         self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
-        self._model = ORTModelForSequenceClassification.from_pretrained(
-            str(self.model_path),
-            provider="CPUExecutionProvider",
+
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.intra_op_num_threads = 2
+        sess_options.inter_op_num_threads = 1
+
+        self._session = ort.InferenceSession(
+            str(self.model_file),
+            sess_options=sess_options,
+            providers=["CPUExecutionProvider"],
         )
+
         self._loaded = True
         logger.info("FinBERT model loaded successfully")
 
@@ -116,7 +107,7 @@ class SentimentAnalyzer:
         if not self._loaded:
             return
 
-        self._model = None
+        self._session = None
         self._tokenizer = None
         self._loaded = False
         gc.collect()
@@ -128,18 +119,17 @@ class SentimentAnalyzer:
         return await asyncio.to_thread(self._analyze_sync, texts)
 
     def _analyze_sync(self, texts: list[str]) -> list[SentimentResult]:
-        import numpy as np
-
         self._load_model()
-        if self._model is None or self._tokenizer is None:
+        if self._session is None or self._tokenizer is None:
             raise RuntimeError("FinBERT model failed to initialize")
 
-        labels = ("positive", "negative", "neutral")
-        results: list[SentimentResult] = []
-
         try:
-            for start in range(0, len(texts), self.batch_size):
-                batch = texts[start : start + self.batch_size]
+            results: list[SentimentResult] = []
+            batch_size = 16
+
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i : i + batch_size]
+
                 inputs = self._tokenizer(
                     batch,
                     padding=True,
@@ -147,26 +137,43 @@ class SentimentAnalyzer:
                     max_length=128,
                     return_tensors="np",
                 )
-                outputs = self._model(**inputs)
-                logits = np.asarray(outputs.logits, dtype=np.float32)
+
+                ort_inputs = {
+                    "input_ids": inputs["input_ids"].astype(np.int64),
+                    "attention_mask": inputs["attention_mask"].astype(np.int64),
+                }
+
+                if "token_type_ids" in inputs:
+                    ort_inputs["token_type_ids"] = inputs["token_type_ids"].astype(np.int64)
+
+                outputs = self._session.run(None, ort_inputs)
+                logits = np.asarray(outputs[0], dtype=np.float32)
+
                 exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
                 probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
 
-                for row in probs:
-                    positive = float(row[0])
-                    negative = float(row[1])
-                    neutral = float(row[2])
-                    max_idx = int(np.argmax(row))
+                for j in range(len(batch)):
+                    p_pos = float(probs[j][0])
+                    p_neg = float(probs[j][1])
+                    p_neu = float(probs[j][2])
+
+                    max_idx = int(np.argmax(probs[j]))
+                    label = self.LABELS[max_idx]
+                    confidence = float(probs[j][max_idx])
+                    score = p_pos - p_neg
+
                     results.append(
                         SentimentResult(
-                            label=labels[max_idx],
-                            score=round(positive - negative, 4),
-                            confidence=round(float(row[max_idx]), 4),
-                            positive=round(positive, 4),
-                            negative=round(negative, 4),
-                            neutral=round(neutral, 4),
+                            label=label,
+                            score=round(score, 4),
+                            confidence=round(confidence, 4),
+                            positive=round(p_pos, 4),
+                            negative=round(p_neg, 4),
+                            neutral=round(p_neu, 4),
                         )
                     )
+
             return results
+
         finally:
             self._unload_model()
