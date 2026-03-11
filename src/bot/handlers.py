@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from src.briefing.formatter import _send_briefing_parts
 from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.sentiment.analyzer import SentimentAnalyzer
@@ -103,7 +104,10 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         data = await aggregator.gather_briefing_data()
         briefing_html = formatter.format_on_demand(data)
-        await msg.edit_text(briefing_html)
+        parts = _send_briefing_parts(briefing_html)
+        await msg.edit_text(parts[0])
+        for part in parts[1:]:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=part)
         status = "partial" if data.failed_sections else "sent"
         await db.log_briefing("on_demand", len(briefing_html), status, sections=data.failed_sections)
     except Exception as exc:

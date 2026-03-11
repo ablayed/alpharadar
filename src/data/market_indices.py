@@ -30,7 +30,8 @@ class MarketIndicesFetcher:
         prices: list[AssetPrice] = []
         for index_name, symbol in self._resolved_symbols.items():
             quote = await finnhub_client.get_quote(symbol)
-            prices.append(replace(quote, symbol=index_name))
+            display_symbol = index_name if symbol == INDEX_SYMBOLS[index_name] else symbol
+            prices.append(replace(quote, symbol=display_symbol))
         return prices
 
     async def _validate_symbols(self, finnhub_client: FinnhubClient) -> None:
@@ -45,4 +46,3 @@ class MarketIndicesFetcher:
             if fallback_quote.current_price > 0:
                 self._resolved_symbols[index_name] = fallback_symbol
         self._validated = True
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from src.data.finnhub_client import FinnhubClient
+from src.data.finnhub_client import FinnhubClient, _is_relevant_news
 
 
 @pytest.mark.asyncio
@@ -90,3 +90,77 @@ async def test_get_company_news_empty_array(db) -> None:
 
     assert news == []
 
+
+@pytest.mark.asyncio
+async def test_get_company_news_filters_to_latest_relevant_headline(db) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/company-news"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "category": "company",
+                        "datetime": 1_700_000_300,
+                        "headline": "Rosenblatt is Bullish on Lumentum Holdings",
+                        "id": 1,
+                        "image": "",
+                        "related": "NVDA,LITE",
+                        "source": "Test",
+                        "summary": "Analyst note focused on Lumentum.",
+                        "url": "https://example.com/lite",
+                    },
+                    {
+                        "category": "company",
+                        "datetime": 1_700_000_200,
+                        "headline": "Jensen Huang says NVIDIA demand remains strong",
+                        "id": 2,
+                        "image": "",
+                        "related": "NVDA",
+                        "source": "Test",
+                        "summary": "NVIDIA datacenter orders continue to grow.",
+                        "url": "https://example.com/nvda",
+                    },
+                    {
+                        "category": "company",
+                        "datetime": 1_700_000_100,
+                        "headline": "NVIDIA launches new enterprise AI tools",
+                        "id": 3,
+                        "image": "",
+                        "related": "NVDA",
+                        "source": "Test",
+                        "summary": "Older but still relevant.",
+                        "url": "https://example.com/nvda-older",
+                    },
+                ],
+            )
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    client = FinnhubClient(api_key="test", db=db, transport=httpx.MockTransport(handler))
+    await client.initialize()
+    news = await client.get_company_news("NVDA", company_name="NVIDIA")
+    await client.close()
+
+    assert len(news) == 1
+    assert news[0].headline == "Jensen Huang says NVIDIA demand remains strong"
+    assert news[0].related_symbols[0] == "NVDA"
+
+
+def test_is_relevant_news_requires_symbol_or_company_match() -> None:
+    assert _is_relevant_news(
+        "NVIDIA launches new Blackwell systems",
+        "",
+        "NVDA",
+        "NVIDIA",
+    )
+    assert _is_relevant_news(
+        "Analysts cite Jensen Huang as AI demand stays robust",
+        "",
+        "NVDA",
+        "NVIDIA",
+    )
+    assert not _is_relevant_news(
+        "Rosenblatt is Bullish on Lumentum Holdings",
+        "Analyst note focused on Lumentum.",
+        "NVDA",
+        "NVIDIA",
+    )

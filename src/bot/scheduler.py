@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import Application, ContextTypes
 
+from src.briefing.formatter import _send_briefing_parts
 from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.storage.database import Database
@@ -137,10 +138,8 @@ async def send_scheduled_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id: int | str = context.job.chat_id
         else:
             chat_id = int(settings.telegram_chat_id)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=message,
-        )
+        for part in _send_briefing_parts(message):
+            await context.bot.send_message(chat_id=chat_id, text=part)
 
         status = "partial" if data.failed_sections else "sent"
         await db.log_briefing(briefing_type, len(message), status, sections=data.failed_sections)

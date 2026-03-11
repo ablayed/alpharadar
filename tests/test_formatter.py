@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from src.briefing.formatter import BriefingFormatter, _sentiment_indicator, _sentiment_summary
+from src.briefing.formatter import (
+    MAX_TELEGRAM_LENGTH,
+    BriefingFormatter,
+    _send_briefing_parts,
+    _sentiment_indicator,
+    _sentiment_summary,
+)
 from src.briefing.models import BriefingData
 from src.data.base import (
     AssetPrice,
@@ -66,9 +72,9 @@ def _sample_data(is_weekend: bool) -> BriefingData:
         market_is_open=True,
         market_session="regular",
         index_prices=[
-            _make_asset("S&P 500", AssetType.STOCK, 5842.3, 0.32),
-            _make_asset("NASDAQ", AssetType.STOCK, 18421.5, 0.51),
-            _make_asset("VIX", AssetType.STOCK, 14.2, 1.8),
+            _make_asset("SPY", AssetType.STOCK, 584.23, 0.32),
+            _make_asset("QQQ", AssetType.STOCK, 421.15, 1.51),
+            _make_asset("VIX", AssetType.STOCK, 31.2, -9.5),
         ],
         stock_prices=[
             _make_asset("NVDA", AssetType.STOCK, 142.3, 3.2),
@@ -83,7 +89,7 @@ def _sample_data(is_weekend: bool) -> BriefingData:
         ],
         news_items=[
             _make_news(
-                headline="Datacenter revenue beat & guidance raise",
+                headline="NVIDIA datacenter revenue beat & guidance raise",
                 symbol="NVDA",
                 label="positive",
                 score=0.82,
@@ -124,7 +130,7 @@ def _sample_data(is_weekend: bool) -> BriefingData:
             )
         ],
         total_tvl=142_800_000_000,
-        tvl_change_24h_pct=0.6,
+        tvl_change_24h_pct=3.6,
         defi_movers=[
             DeFiProtocol(
                 name="Aave",
@@ -147,7 +153,7 @@ def _sample_data(is_weekend: bool) -> BriefingData:
     )
 
 
-def test_format_daily_contains_sections_and_sentiment_markup() -> None:
+def test_format_daily_contains_context_annotations_and_no_filler() -> None:
     formatter = BriefingFormatter()
     data = _sample_data(is_weekend=False)
     text = formatter.format_daily(data)
@@ -156,9 +162,19 @@ def test_format_daily_contains_sections_and_sentiment_markup() -> None:
     assert "<b>STOCKS</b>" in text
     assert "<b>CRYPTO</b>" in text
     assert "<b>CATALYSTS</b>" in text
-    assert "📈 Datacenter revenue beat &amp; guidance raise" in text
+    assert "SPY: $584.23 +0.3% (S&amp;P 500 proxy)" in text
+    assert "QQQ: $421.15 🟢 +1.5% (NASDAQ proxy)" in text
+    assert "<i>VIX at 31 signals high fear  DeFi capital inflows accelerating</i>" in text
+    assert "🟢 <b>NVDA</b> $142.30 jumping +3.2%" in text
+    assert "    NVIDIA datacenter revenue beat &amp; guidance raise" in text
+    assert "🔴 <b>TSLA</b> $178.50 dipping -1.8%" in text
+    assert "<b>AAPL</b> $198.20 +0.1%" in text
+    assert "No significant news" not in text
+    assert "🟢 <b>SOL</b> $168.40 rallying +5.2% (7d: +12.1%  solid weekly gains)" in text
+    assert "🔴 <b>FET</b> $1.82 dipping -3.1% (7d: -8.4%  weak weekly trend)" in text
     assert "Sentiment: 📈 1 pos  📉 1 neg  1 neu" in text
-    assert len(text) <= 4096
+    assert "📋 8-K: MSFT  Entry into a Material Agreement (filed Mar 5)" in text
+    assert "CG budget: 342/10,000  Next briefing: Tomorrow 7:00 AM" in text
 
 
 def test_format_weekend_excludes_stock_and_catalysts() -> None:
@@ -169,7 +185,7 @@ def test_format_weekend_excludes_stock_and_catalysts() -> None:
     assert "<b>STOCKS</b>" not in text
     assert "<b>CATALYSTS</b>" not in text
     assert "<b>DEFI MOVERS</b>" in text
-    assert len(text) <= 4096
+    assert "CG budget: 342/10,000  Next briefing: Tomorrow 7:00 AM" in text
 
 
 def test_sentiment_indicator_thresholds() -> None:
@@ -216,3 +232,19 @@ def test_sentiment_summary_counts_missing_data_as_neutral() -> None:
     ]
 
     assert _sentiment_summary(news_items) == "Sentiment: 📈 1 pos  📉 1 neg  1 neu"
+
+
+def test_send_briefing_parts_splits_at_section_boundaries() -> None:
+    long_section = "\n".join(f"Line {idx} {'x' * 80}" for idx in range(80))
+    message = (
+        "Header\n\n"
+        f"<b>STOCKS</b>\n{long_section}\n\n"
+        f"<b>CRYPTO</b>\n{long_section}\n\n"
+        "<i>Footer</i>"
+    )
+
+    parts = _send_briefing_parts(message)
+
+    assert len(parts) >= 2
+    assert all(len(part) <= MAX_TELEGRAM_LENGTH for part in parts)
+    assert any("<b>CRYPTO</b>" in part for part in parts)

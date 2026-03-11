@@ -175,11 +175,12 @@ class DataAggregator:
             failed_sections,
         )
 
-        top_movers = sorted(stock_prices, key=lambda p: abs(p.change_24h_pct), reverse=True)[:3]
+        company_names = {item.symbol.upper(): item.display_name for item in stock_items}
+        headline_symbols = [item.symbol for item in stock_prices if abs(item.change_24h_pct) > 1.5]
         news_items: list[NewsItem] = []
-        if top_movers:
+        if headline_symbols and not is_weekend:
             try:
-                news_items = await self._fetch_news([item.symbol for item in top_movers])
+                news_items = await self._fetch_news(headline_symbols, company_names)
                 news_items = await self._enrich_with_sentiment(news_items)
             except Exception:
                 logger.exception("Failed to fetch company news")
@@ -259,8 +260,18 @@ class DataAggregator:
             )
         return mapped
 
-    async def _fetch_news(self, symbols: list[str]) -> list[NewsItem]:
-        coroutines = [self.finnhub.get_company_news(symbol) for symbol in symbols]
+    async def _fetch_news(
+        self,
+        symbols: list[str],
+        company_names: dict[str, str],
+    ) -> list[NewsItem]:
+        coroutines = [
+            self.finnhub.get_company_news(
+                symbol,
+                company_name=company_names.get(symbol.upper()),
+            )
+            for symbol in symbols
+        ]
         results = await asyncio.gather(*coroutines, return_exceptions=True)
         news: list[NewsItem] = []
         for result in results:

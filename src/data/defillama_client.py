@@ -8,7 +8,7 @@ import httpx
 from aiolimiter import AsyncLimiter
 from pydantic import BaseModel, Field
 
-from src.data.base import BaseDataProvider, DataFreshness, DeFiProtocol
+from src.data.base import BaseDataProvider, DeFiProtocol
 from src.storage.database import Database
 from src.utils.rate_limiter import RateLimitedClient
 
