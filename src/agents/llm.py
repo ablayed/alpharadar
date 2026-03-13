@@ -19,7 +19,7 @@ class GeminiClient:
     Async Gemini client with light rate limiting for the daily agent pipeline.
     """
 
-    MODEL = "gemini-2.5-flash-lite"
+    MODEL = "gemini-2.5-flash"
     _limiter: ClassVar[AsyncLimiter] = AsyncLimiter(max_rate=12, time_period=60)
 
     def __init__(self, api_key: str) -> None:
