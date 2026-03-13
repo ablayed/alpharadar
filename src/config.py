@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     finnhub_api_key: SecretStr
     coingecko_api_key: SecretStr
+    gemini_api_key: SecretStr | None = None
 
     briefing_hour: int = 7
     briefing_minute: int = 0

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from src.agents.state import AgentAnalysis
 from src.data.base import AssetPrice, DeFiProtocol, EarningsEvent, NewsItem, SECFiling
 
 
@@ -32,6 +33,5 @@ class BriefingData:
 
     coingecko_usage: tuple[int, int]
 
-    # Phase 3: agent_analysis: dict | None = None  # LangGraph Bull/Bear debate output
+    agent_analysis: AgentAnalysis | None = None
     failed_sections: list[str] = field(default_factory=list)
-

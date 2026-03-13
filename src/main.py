@@ -19,6 +19,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Defa
 
 from src.bot.handlers import (
     add_command,
+    analyze_command,
     briefing_command,
     handle_asset_type_callback,
     help_command,
@@ -80,7 +81,7 @@ async def post_shutdown(application: Application[Any, Any, Any, Any, Any, Any]) 
     logger.info("AlphaRadar shutdown complete")
 
 
-async def error_handler(update, context) -> None:
+async def error_handler(update: object, context: Any) -> None:
     import traceback
 
     print(f"ERROR: {context.error}")
@@ -103,6 +104,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("briefing", briefing_command))
+    application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("add", add_command))
     application.add_handler(CommandHandler("remove", remove_command))

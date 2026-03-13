@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 from zoneinfo import ZoneInfo
 
 from src.briefing.models import BriefingData
@@ -25,6 +25,11 @@ from src.data.market_indices import MarketIndicesFetcher
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.sentiment.cache import SentimentCache
 from src.storage.database import Database, WatchlistItem
+
+if TYPE_CHECKING:
+    from src.agents.graph import AgentPipeline
+    from src.agents.llm import GeminiClient
+    from src.agents.state import AgentAnalysis
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -58,6 +63,9 @@ class DataAggregator:
         self.market_indices = MarketIndicesFetcher()
         self.sentiment_analyzer = SentimentAnalyzer()
         self.sentiment_cache = SentimentCache(db=db)
+        self._gemini_client: GeminiClient | None = None
+        self._agent_pipeline: AgentPipeline | None = None
+        self._agent_pipeline_init_error: str | None = None
 
     async def initialize(self) -> None:
         await asyncio.gather(
@@ -70,6 +78,7 @@ class DataAggregator:
             await self.sentiment_analyzer.initialize()
         except Exception:
             logger.exception("Sentiment analyzer initialization failed; continuing without sentiment")
+        await self._ensure_agent_pipeline()
 
     async def close(self) -> None:
         await asyncio.gather(
@@ -79,6 +88,15 @@ class DataAggregator:
             self.edgar.close(),
         )
         self.sentiment_analyzer.close()
+
+    def agent_pipeline_status_text(self) -> str:
+        if self.settings.gemini_api_key is None:
+            return "No GEMINI_API_KEY set"
+        if self._agent_pipeline is not None:
+            return "Ready (Gemini Flash-Lite)"
+        if self._agent_pipeline_init_error is not None:
+            return "Configured but unavailable"
+        return "Initializing"
 
     async def provider_health(self) -> dict[str, bool]:
         results = await asyncio.gather(
@@ -95,7 +113,7 @@ class DataAggregator:
             "edgar": bool(results[3]) if not isinstance(results[3], BaseException) else False,
         }
 
-    async def gather_briefing_data(self) -> BriefingData:
+    async def gather_briefing_data(self, *, include_agent_analysis: bool = True) -> BriefingData:
         tz = ZoneInfo(self.settings.timezone)
         now = datetime.now(tz)
         is_weekend = now.weekday() >= 5
@@ -198,7 +216,7 @@ class DataAggregator:
         defi_movers: list[DeFiProtocol]
         total_tvl, tvl_change_24h_pct, defi_movers = defi_data
 
-        return BriefingData(
+        briefing_data = BriefingData(
             generated_at=now,
             is_weekend=is_weekend,
             market_is_open=market_is_open,
@@ -214,8 +232,14 @@ class DataAggregator:
             defi_movers=defi_movers,
             trending_crypto=trending,
             coingecko_usage=coingecko_usage,
+            agent_analysis=None,
             failed_sections=sorted(set(failed_sections)),
         )
+
+        if include_agent_analysis:
+            briefing_data.agent_analysis = await self.run_agent_analysis(briefing_data)
+
+        return briefing_data
 
     async def _fetch_stock_prices(self, symbols: list[str]) -> list[AssetPrice]:
         if not symbols:
@@ -317,12 +341,12 @@ class DataAggregator:
                 return news_items
 
         for item in news_items:
-            result = cached.get(item.headline)
-            if result is None:
+            sentiment_result = cached.get(item.headline)
+            if sentiment_result is None:
                 continue
-            item.sentiment_label = result.label
-            item.sentiment_score = result.score
-            item.sentiment_confidence = result.confidence
+            item.sentiment_label = sentiment_result.label
+            item.sentiment_score = sentiment_result.score
+            item.sentiment_confidence = sentiment_result.confidence
 
         return news_items
 
@@ -335,6 +359,54 @@ class DataAggregator:
         total_tvl, change = await self.defillama.get_total_tvl()
         movers = await self.defillama.get_top_movers(5)
         return total_tvl, change, movers
+
+    async def run_agent_analysis(
+        self,
+        briefing_data: BriefingData,
+        *,
+        forced_symbols: list[str] | None = None,
+    ) -> AgentAnalysis | None:
+        pipeline = await self._ensure_agent_pipeline()
+        if pipeline is None:
+            return None
+
+        try:
+            analysis = await pipeline.run(briefing_data, forced_symbols=forced_symbols)
+        except Exception:
+            logger.exception("Agent pipeline failed; continuing without agent analysis")
+            return None
+
+        logger.info(
+            "Agent pipeline complete: %s calls, %.1fs, %s verdict(s)",
+            analysis.total_llm_calls,
+            analysis.pipeline_duration_seconds,
+            len(analysis.debate_verdicts),
+        )
+        return analysis
+
+    async def _ensure_agent_pipeline(self) -> AgentPipeline | None:
+        if self.settings.gemini_api_key is None:
+            return None
+        if self._agent_pipeline is not None:
+            return self._agent_pipeline
+
+        try:
+            from src.agents.graph import AgentPipeline
+            from src.agents.llm import GeminiClient
+
+            api_key = self.settings.gemini_api_key.get_secret_value()
+            gemini = GeminiClient(api_key=api_key)
+            await gemini.initialize()
+            self._gemini_client = gemini
+            self._agent_pipeline = AgentPipeline(gemini_client=gemini)
+            self._agent_pipeline_init_error = None
+        except Exception as exc:
+            self._agent_pipeline = None
+            self._gemini_client = None
+            self._agent_pipeline_init_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("Agent pipeline initialization failed; continuing without Gemini")
+
+        return self._agent_pipeline
 
     @staticmethod
     def _result_or_default(

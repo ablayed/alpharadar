@@ -162,7 +162,7 @@ class DeFiLlamaClient(BaseDataProvider):
             return float(parsed.tvl)
         if isinstance(parsed.tvl, list) and parsed.tvl:
             latest = parsed.tvl[-1]
-            if isinstance(latest, HistoricalTVLEntry):
+            if isinstance(latest, HistoricalTVLEntry) and latest.tvl is not None:
                 return float(latest.tvl)
         return 0.0
 

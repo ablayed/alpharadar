@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from src.briefing.formatter import _send_briefing_parts
+from src.briefing.formatter import BriefingFormatter, _send_briefing_parts
 from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.sentiment.analyzer import SentimentAnalyzer
@@ -68,13 +68,16 @@ def _help_text() -> str:
         "/add btc  Add a crypto to watchlist\n"
         "/remove TSLA  Remove from watchlist\n"
         "/sentiment &lt;text&gt;  Analyze ad hoc sentiment\n"
+        "/analyze NVDA  Run Bull/Bear AI debate for one symbol\n"
         "/status  API usage and system health\n"
         "/help  Show this message"
     )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"DEBUG: Received /start from chat_id={update.effective_chat.id}")
+    chat = update.effective_chat
+    chat_id = chat.id if chat is not None else "unknown"
+    print(f"DEBUG: Received /start from chat_id={chat_id}")
     if not await owner_only(update, context):
         return
     if update.message is None:
@@ -95,6 +98,9 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     if update.message is None:
         return
+    chat = update.effective_chat
+    if chat is None:
+        return
 
     msg = await update.message.reply_text("⏳ Fetching data...")
     aggregator = _aggregator_from_context(context)
@@ -107,7 +113,7 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parts = _send_briefing_parts(briefing_html)
         await msg.edit_text(parts[0])
         for part in parts[1:]:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=part)
+            await context.bot.send_message(chat_id=chat.id, text=part)
         status = "partial" if data.failed_sections else "sent"
         await db.log_briefing("on_demand", len(briefing_html), status, sections=data.failed_sections)
     except Exception as exc:
@@ -135,6 +141,58 @@ async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"{_symbol_grid(crypto)}"
     )
     await update.message.reply_text(text)
+
+
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /analyze &lt;symbol&gt;")
+        return
+
+    symbol = context.args[0].strip().upper()
+    if not symbol:
+        await update.message.reply_text("Usage: /analyze &lt;symbol&gt;")
+        return
+
+    msg = await update.message.reply_text(
+        f"\U0001F916 Running agent analysis for {html.escape(symbol)}..."
+    )
+    aggregator = _aggregator_from_context(context)
+    formatter = _formatter_from_context(context)
+
+    try:
+        data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+        available_symbols = {
+            item.symbol.upper()
+            for item in [*data.stock_prices, *data.crypto_prices]
+        }
+        if symbol not in available_symbols:
+            await msg.edit_text(
+                f"\u26A0\uFE0F {html.escape(symbol)} is not in the current watchlist data."
+            )
+            return
+
+        analysis = await aggregator.run_agent_analysis(data, forced_symbols=[symbol])
+        if analysis is None:
+            await msg.edit_text(
+                "\u26A0\uFE0F Agent pipeline unavailable. Check GEMINI_API_KEY or Gemini status."
+            )
+            return
+
+        response = formatter.format_agent_verdict(symbol, analysis)
+        if response is None:
+            await msg.edit_text(
+                f"\u26A0\uFE0F Agent pipeline ran but produced no verdict for {html.escape(symbol)}."
+            )
+            return
+        await msg.edit_text(response)
+    except Exception as exc:
+        logger.exception("Analyze command failed for %s", symbol)
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Analysis failed.\n<i>{escaped_error[:250]}</i>")
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -246,6 +304,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if aggregator.sentiment_analyzer.is_available()
         else "Not available"
     )
+    agent_status = aggregator.agent_pipeline_status_text()
     next_briefing = _next_briefing_text()
     uptime = _uptime_text(context)
 
@@ -257,6 +316,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"📡 DeFi Llama: {_status_label(health['defillama'])}\n"
         f"📡 SEC EDGAR: {_status_label(health['edgar'])}\n"
         f"🧠 FinBERT: {model_status}\n"
+        f"🤖 Agent Pipeline: {agent_status}\n"
         f"📊 Sentiment cache: {sentiment_cache_count:,} headlines cached\n\n"
         f"📋 Watchlist: {len(stocks)} stocks, {len(crypto)} crypto\n"
         f"📅 Next briefing: {next_briefing}\n"
@@ -420,6 +480,13 @@ def _aggregator_from_context(context: ContextTypes.DEFAULT_TYPE) -> DataAggregat
     if not isinstance(aggregator, DataAggregator):
         raise RuntimeError("DataAggregator missing from bot_data")
     return aggregator
+
+
+def _formatter_from_context(context: ContextTypes.DEFAULT_TYPE) -> BriefingFormatter:
+    formatter = context.bot_data.get("formatter")
+    if not isinstance(formatter, BriefingFormatter):
+        raise RuntimeError("BriefingFormatter missing from bot_data")
+    return formatter
 
 
 def _sentiment_analyzer_from_context(context: ContextTypes.DEFAULT_TYPE) -> SentimentAnalyzer:

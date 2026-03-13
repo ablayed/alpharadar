@@ -5,9 +5,10 @@ import logging
 import logging.handlers
 import sys
 import traceback
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Coroutine
 from zoneinfo import ZoneInfo
 
 # Fix Windows console encoding for emoji support.
@@ -71,7 +72,10 @@ async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     logger.info("")
 
 
-def debug_wrap(handler_name: str, handler_func):
+def debug_wrap(
+    handler_name: str,
+    handler_func: Callable[[Update, ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, Any]],
+) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, Any]]:
     """Wrap any handler with pre/post logging."""
 
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Any:
@@ -89,7 +93,10 @@ def debug_wrap(handler_name: str, handler_func):
     return wrapper
 
 
-def debug_wrap_job(job_name: str, job_func):
+def debug_wrap_job(
+    job_name: str,
+    job_func: Callable[[ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, None]],
+) -> Callable[[ContextTypes.DEFAULT_TYPE], Coroutine[Any, Any, None]]:
     """Wrap a scheduled job callback with logging."""
 
     async def wrapper(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -237,6 +244,7 @@ def main() -> None:
     from src.bot.handlers import (
         start_command,
         briefing_command,
+        analyze_command,
         watchlist_command,
         add_command,
         remove_command,
@@ -253,6 +261,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", debug_wrap("start_command", start_command)))
     application.add_handler(CommandHandler("briefing", debug_wrap("briefing_command", briefing_command)))
+    application.add_handler(CommandHandler("analyze", debug_wrap("analyze_command", analyze_command)))
     application.add_handler(CommandHandler("watchlist", debug_wrap("watchlist_command", watchlist_command)))
     application.add_handler(CommandHandler("add", debug_wrap("add_command", add_command)))
     application.add_handler(CommandHandler("remove", debug_wrap("remove_command", remove_command)))

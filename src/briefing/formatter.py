@@ -4,11 +4,13 @@ import html
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from src.agents.state import AgentAnalysis, DebateVerdict
 from src.briefing.models import BriefingData
 from src.config import settings
 from src.data.base import AssetPrice, DeFiProtocol, NewsItem, SECFiling
 
 MAX_TELEGRAM_LENGTH = 4_096
+AI_VERDICT_MAX_LENGTH = 500
 INDEX_PROXY_NOTES: dict[str, str] = {
     "SPY": "S&P 500 proxy",
     "QQQ": "NASDAQ proxy",
@@ -248,6 +250,7 @@ class BriefingFormatter:
             sections.extend(
                 [
                     self._format_crypto_section(data.crypto_prices),
+                    self._format_ai_deep_dive(data.agent_analysis),
                     self._format_defi_movers(data.defi_movers),
                 ]
             )
@@ -256,6 +259,7 @@ class BriefingFormatter:
                 [
                     self._format_stocks_section(data.stock_prices, data.news_items, include_headlines),
                     self._format_crypto_section(data.crypto_prices),
+                    self._format_ai_deep_dive(data.agent_analysis),
                     self._format_catalysts(data),
                 ]
             )
@@ -349,6 +353,51 @@ class BriefingFormatter:
             lines.append(self._format_asset_line(item, asset_type="crypto"))
         return "\n".join(lines)
 
+    def _format_ai_deep_dive(self, analysis: AgentAnalysis | None) -> str:
+        if analysis is None or not analysis.debate_verdicts:
+            return ""
+
+        lines = ["\U0001F916 <b>AI DEEP DIVE</b>"]
+        for verdict in analysis.debate_verdicts[:2]:
+            lines.append(
+                "\n".join(
+                    self._ai_verdict_lines(
+                        verdict,
+                        include_symbol_header=True,
+                        max_length=AI_VERDICT_MAX_LENGTH,
+                    )
+                )
+            )
+
+        lines.append(
+            f"<i>\U0001F9E0 Pipeline: {analysis.total_llm_calls} LLM calls in "
+            f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>"
+        )
+        return "\n\n".join(line for line in lines if line)
+
+    def format_agent_verdict(self, symbol: str, analysis: AgentAnalysis) -> str | None:
+        symbol_upper = symbol.upper()
+        verdict = next(
+            (item for item in analysis.debate_verdicts if item.symbol.upper() == symbol_upper),
+            None,
+        )
+        if verdict is None:
+            return None
+
+        lines = [
+            f"\U0001F916 <b>Agent Analysis: {self._escape(symbol_upper)}</b>",
+            "",
+            *self._ai_verdict_lines(
+                verdict,
+                include_symbol_header=False,
+                max_length=800,
+            ),
+            "",
+            f"<i>\U0001F9E0 {analysis.total_llm_calls} LLM calls in "
+            f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>",
+        ]
+        return "\n".join(lines)
+
     def _format_catalysts(self, data: BriefingData) -> str:
         lines = ["🧭 <b>CATALYSTS</b>"]
 
@@ -364,6 +413,83 @@ class BriefingFormatter:
         for filing in data.sec_filings[:5]:
             lines.append(self._format_filing_line(filing))
         return "\n".join(lines)
+
+    def _ai_verdict_lines(
+        self,
+        verdict: DebateVerdict,
+        *,
+        include_symbol_header: bool,
+        max_length: int,
+    ) -> list[str]:
+        summary = self._sanitize_ai_text(verdict.summary, 140)
+        bull = self._sanitize_ai_text(verdict.bull_thesis, 95)
+        bear = self._sanitize_ai_text(verdict.bear_thesis, 95)
+        risk = self._sanitize_ai_text(verdict.key_risk, 80)
+        watch = self._sanitize_ai_text(verdict.action_context, 80)
+
+        while True:
+            lines: list[str] = []
+            if include_symbol_header:
+                lines.append(self._format_ai_symbol_header(verdict))
+            lines.append(
+                f"{self._view_emoji(verdict.prevailing_view)} <b>Verdict:</b> "
+                f"{verdict.prevailing_view.title()} ({verdict.confidence:.0%} confidence)"
+            )
+            if summary:
+                lines.extend(["", summary])
+            if bull:
+                lines.extend(["", f"\U0001F4C8 <b>Bulls say:</b> {bull}"])
+            if bear:
+                lines.append(f"\U0001F4C9 <b>Bears say:</b> {bear}")
+            if risk:
+                lines.append(f"\u26A0\uFE0F <b>Key risk:</b> {risk}")
+            if watch:
+                lines.append(f"\U0001F441 <b>Watch:</b> {watch}")
+
+            block = "\n".join(lines)
+            if len(block) <= max_length:
+                return lines
+
+            overflow = len(block) - max_length + 3
+            if len(summary) > 40:
+                summary = self._truncate(summary, max(40, len(summary) - overflow))
+                continue
+            if len(bull) > 32:
+                bull = self._truncate(bull, max(32, len(bull) - overflow))
+                continue
+            if len(bear) > 32:
+                bear = self._truncate(bear, max(32, len(bear) - overflow))
+                continue
+            if len(risk) > 24:
+                risk = self._truncate(risk, max(24, len(risk) - overflow))
+                continue
+            if len(watch) > 24:
+                watch = self._truncate(watch, max(24, len(watch) - overflow))
+                continue
+            return [self._truncate(block, max_length)]
+
+    def _format_ai_symbol_header(self, verdict: DebateVerdict) -> str:
+        selection_suffix = ""
+        if verdict.selection_reason:
+            selection_suffix = f" (selected: {self._escape(verdict.selection_reason)})"
+        return f"\U0001F4CA <b>{self._escape(verdict.display_name)}</b>{selection_suffix}"
+
+    def _sanitize_ai_text(self, value: str, limit: int) -> str:
+        collapsed = " ".join(value.split())
+        escaped = self._escape(collapsed)
+        return self._truncate(escaped, limit)
+
+    @staticmethod
+    def _view_emoji(view: str) -> str:
+        if view == "bullish":
+            return "\U0001F4C8"
+        if view == "bearish":
+            return "\U0001F4C9"
+        return "\u2696\uFE0F"
+
+    @staticmethod
+    def _format_duration(value: float) -> str:
+        return f"{value:.1f}s"
 
     def _format_defi_movers(self, movers: list[DeFiProtocol]) -> str:
         lines = ["🏦 <b>DEFI MOVERS</b>"]

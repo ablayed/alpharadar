@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from src.agents.state import AgentAnalysis, DebateVerdict
 from src.briefing.formatter import (
     MAX_TELEGRAM_LENGTH,
     BriefingFormatter,
@@ -153,6 +154,27 @@ def _sample_data(is_weekend: bool) -> BriefingData:
     )
 
 
+def _sample_agent_analysis() -> AgentAnalysis:
+    return AgentAnalysis(
+        debate_verdicts=[
+            DebateVerdict(
+                symbol="NVDA",
+                display_name="NVDA",
+                prevailing_view="bullish",
+                confidence=0.72,
+                summary="Datacenter demand remains firm and the latest move is backed by strong sentiment.",
+                bull_thesis="AI infrastructure demand still supports upside momentum.",
+                bear_thesis="Valuation leaves little room for a softer guide.",
+                key_risk="Any negative revision to AI capex guidance.",
+                action_context="Watch for demand commentary and follow-through in semis.",
+                selection_reason="+3.2% move",
+            )
+        ],
+        total_llm_calls=6,
+        pipeline_duration_seconds=12.3,
+    )
+
+
 def test_format_daily_contains_context_annotations_and_no_filler() -> None:
     formatter = BriefingFormatter()
     data = _sample_data(is_weekend=False)
@@ -186,6 +208,23 @@ def test_format_weekend_excludes_stock_and_catalysts() -> None:
     assert "<b>CATALYSTS</b>" not in text
     assert "<b>DEFI MOVERS</b>" in text
     assert "CG budget: 342/10,000  Next briefing: Tomorrow 7:00 AM" in text
+
+
+def test_format_daily_includes_ai_deep_dive_when_present() -> None:
+    formatter = BriefingFormatter()
+    data = _sample_data(is_weekend=False)
+    data.agent_analysis = _sample_agent_analysis()
+
+    text = formatter.format_daily(data)
+
+    assert "<b>AI DEEP DIVE</b>" in text
+    assert "NVDA" in text
+    assert "Verdict:</b> Bullish (72% confidence)" in text
+    assert "Bulls say:" in text
+    assert "Bears say:" in text
+    assert "Key risk:" in text
+    assert "Watch:" in text
+    assert "Pipeline: 6 LLM calls in 12.3s" in text
 
 
 def test_sentiment_indicator_thresholds() -> None:

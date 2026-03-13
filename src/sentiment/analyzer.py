@@ -84,10 +84,10 @@ class SentimentAnalyzer:
 
         logger.info("Loading FinBERT ONNX model into memory...")
 
-        import onnxruntime as ort
+        import onnxruntime as ort  # type: ignore[import-untyped]
         from transformers import AutoTokenizer
 
-        self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))
+        self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_path))  # type: ignore[no-untyped-call]
 
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
