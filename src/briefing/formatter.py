@@ -10,7 +10,7 @@ from src.config import settings
 from src.data.base import AssetPrice, DeFiProtocol, NewsItem, SECFiling
 
 MAX_TELEGRAM_LENGTH = 4_096
-AI_VERDICT_MAX_LENGTH = 500
+AI_VERDICT_MAX_LENGTH = 700
 INDEX_PROXY_NOTES: dict[str, str] = {
     "SPY": "S&P 500 proxy",
     "QQQ": "NASDAQ proxy",
@@ -390,7 +390,7 @@ class BriefingFormatter:
             *self._ai_verdict_lines(
                 verdict,
                 include_symbol_header=False,
-                max_length=800,
+                max_length=1200,
             ),
             "",
             f"<i>\U0001F9E0 {analysis.total_llm_calls} LLM calls in "
