@@ -91,6 +91,15 @@ CREATE TABLE IF NOT EXISTS sentiment_cache (
     analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
     model_version TEXT NOT NULL DEFAULT 'finbert-onnx-v1'
 );
+
+CREATE TABLE IF NOT EXISTS event_cache (
+    headline_hash TEXT PRIMARY KEY,
+    headline_text TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    classified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    model_version TEXT NOT NULL DEFAULT 'gemini-2.5-flash-event-v1'
+);
 """
 
 
@@ -296,5 +305,12 @@ class Database:
         async with aiosqlite.connect(self.db_path) as conn:
             await self._configure_connection(conn)
             cursor = await conn.execute("SELECT COUNT(*) FROM sentiment_cache")
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    async def get_event_cache_count(self) -> int:
+        async with aiosqlite.connect(self.db_path) as conn:
+            await self._configure_connection(conn)
+            cursor = await conn.execute("SELECT COUNT(*) FROM event_cache")
             row = await cursor.fetchone()
             return int(row[0]) if row else 0

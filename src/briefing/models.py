@@ -5,6 +5,7 @@ from datetime import datetime
 
 from src.agents.state import AgentAnalysis
 from src.data.base import AssetPrice, DeFiProtocol, EarningsEvent, NewsItem, SECFiling
+from src.events.models import DetectedEvent
 
 
 @dataclass(slots=True)
@@ -33,5 +34,6 @@ class BriefingData:
 
     coingecko_usage: tuple[int, int]
 
+    event_data: list[DetectedEvent] = field(default_factory=list)
     agent_analysis: AgentAnalysis | None = None
     failed_sections: list[str] = field(default_factory=list)

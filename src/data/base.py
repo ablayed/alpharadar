@@ -44,7 +44,11 @@ class NewsItem:
     sentiment_label: str | None = None
     sentiment_score: float | None = None
     sentiment_confidence: float | None = None
-    # Phase 4: event_type: str | None = None, event_confidence: float | None = None
+    event_type: str | None = None
+    event_confidence: float | None = None
+    expected_car_pct: float | None = None
+    expected_car_window: str | None = None
+    remaining_drift_pct: float | None = None
 
 
 @dataclass(slots=True)

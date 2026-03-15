@@ -9,8 +9,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.briefing.formatter import BriefingFormatter, _send_briefing_parts
+from src.briefing.models import BriefingData
 from src.config import settings
 from src.data.aggregator import DataAggregator
+from src.events.calibration import format_remaining_drift_status
+from src.events.models import DetectedEvent
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.storage.database import Database, WatchlistItem
 
@@ -69,6 +72,7 @@ def _help_text() -> str:
         "/remove TSLA  Remove from watchlist\n"
         "/sentiment &lt;text&gt;  Analyze ad hoc sentiment\n"
         "/analyze NVDA  Run Bull/Bear AI debate for one symbol\n"
+        "/events  Show latest detected events\n"
         "/status  API usage and system health\n"
         "/help  Show this message"
     )
@@ -109,6 +113,7 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         data = await aggregator.gather_briefing_data()
+        _store_latest_briefing(context, data)
         briefing_html = formatter.format_on_demand(data)
         parts = _send_briefing_parts(briefing_html)
         await msg.edit_text(parts[0])
@@ -165,6 +170,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+        _store_latest_briefing(context, data)
         available_symbols = {
             item.symbol.upper()
             for item in [*data.stock_prices, *data.crypto_prices]
@@ -193,6 +199,51 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.exception("Analyze command failed for %s", symbol)
         escaped_error = html.escape(str(exc), quote=False)
         await msg.edit_text(f"\u26A0\uFE0F Analysis failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    msg = await update.message.reply_text("\U0001F3F7 Loading latest events...")
+
+    try:
+        data = await _latest_briefing_data(context)
+        events = _relevant_events(data)
+        lines = ["\U0001F3F7 <b>DETECTED EVENTS</b>", ""]
+
+        if events:
+            for event in events:
+                symbols = ", ".join(event.related_symbols) or "?"
+                lines.append(
+                    f"\U0001F4CA <b>{html.escape(symbols, quote=False)}</b> "
+                    f"{html.escape(event.event_type.value, quote=False)} "
+                    f"({event.confidence:.0%} confidence)"
+                )
+                if event.expected_car_pct is not None and event.expected_car_window is not None:
+                    lines.append(
+                        f"   Hist: {event.expected_car_pct:+.1f}% over {event.expected_car_window}"
+                    )
+                if event.actual_move_pct is not None:
+                    status = format_remaining_drift_status(event.event_type, event.actual_move_pct)
+                    status_text = status[:1].upper() + status[1:] if status else "No status"
+                    lines.append(f"   Current: {event.actual_move_pct:+.1f}%  {status_text}")
+                lines.append("")
+        else:
+            lines.append("No calibrated events detected in the latest briefing data.")
+            lines.append("")
+
+        no_event_symbols = _symbols_without_events(data, events)
+        if no_event_symbols:
+            lines.append(f"No event detected: {', '.join(no_event_symbols)}")
+
+        await msg.edit_text("\n".join(lines).strip())
+    except Exception as exc:
+        logger.exception("Events command failed")
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Events lookup failed.\n<i>{escaped_error[:250]}</i>")
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -496,3 +547,36 @@ def _sentiment_analyzer_from_context(context: ContextTypes.DEFAULT_TYPE) -> Sent
     aggregator = _aggregator_from_context(context)
     context.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
     return aggregator.sentiment_analyzer
+
+
+async def _latest_briefing_data(context: ContextTypes.DEFAULT_TYPE) -> BriefingData:
+    cached = context.bot_data.get("latest_briefing_data")
+    if isinstance(cached, BriefingData):
+        return cached
+
+    aggregator = _aggregator_from_context(context)
+    data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+    _store_latest_briefing(context, data)
+    return data
+
+
+def _store_latest_briefing(context: ContextTypes.DEFAULT_TYPE, data: BriefingData) -> None:
+    context.bot_data["latest_briefing_data"] = data
+
+
+def _relevant_events(data: BriefingData) -> list[DetectedEvent]:
+    return [
+        event
+        for event in data.event_data
+        if event.event_type.value not in {"general_news", "unknown"} and event.confidence >= 0.6
+    ]
+
+
+def _symbols_without_events(data: BriefingData, events: list[DetectedEvent]) -> list[str]:
+    all_symbols = sorted({item.symbol.upper() for item in [*data.stock_prices, *data.crypto_prices]})
+    event_symbols = {
+        symbol.upper()
+        for event in events
+        for symbol in event.related_symbols
+    }
+    return [symbol for symbol in all_symbols if symbol not in event_symbols]

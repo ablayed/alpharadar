@@ -22,6 +22,8 @@ from src.data.defillama_client import DeFiLlamaClient
 from src.data.edgar_client import EdgarClient
 from src.data.finnhub_client import FinnhubClient
 from src.data.market_indices import MarketIndicesFetcher
+from src.events.classifier import EventClassifier
+from src.events.models import DetectedEvent
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.sentiment.cache import SentimentCache
 from src.storage.database import Database, WatchlistItem
@@ -196,10 +198,15 @@ class DataAggregator:
         company_names = {item.symbol.upper(): item.display_name for item in stock_items}
         headline_symbols = [item.symbol for item in stock_prices if abs(item.change_24h_pct) > 1.5]
         news_items: list[NewsItem] = []
+        event_data: list[DetectedEvent] = []
         if headline_symbols and not is_weekend:
             try:
                 news_items = await self._fetch_news(headline_symbols, company_names)
                 news_items = await self._enrich_with_sentiment(news_items)
+                news_items, event_data = await self._enrich_with_events(
+                    news_items,
+                    [*stock_prices, *crypto_prices],
+                )
             except Exception:
                 logger.exception("Failed to fetch company news")
                 failed_sections.append("news")
@@ -232,6 +239,7 @@ class DataAggregator:
             defi_movers=defi_movers,
             trending_crypto=trending,
             coingecko_usage=coingecko_usage,
+            event_data=event_data,
             agent_analysis=None,
             failed_sections=sorted(set(failed_sections)),
         )
@@ -349,6 +357,48 @@ class DataAggregator:
             item.sentiment_confidence = sentiment_result.confidence
 
         return news_items
+
+    async def _enrich_with_events(
+        self,
+        news_items: list[NewsItem],
+        all_prices: list[AssetPrice],
+    ) -> tuple[list[NewsItem], list[DetectedEvent]]:
+        """Classify headlines into event types and attach CAR calibration."""
+
+        if not news_items:
+            return news_items, []
+
+        classifier = EventClassifier(db=self.db, gemini_client=self._gemini_client)
+        headline_data: list[dict[str, object]] = []
+        for item in news_items:
+            actual_move = 0.0
+            for symbol in item.related_symbols:
+                price = next((candidate for candidate in all_prices if candidate.symbol == symbol), None)
+                if price is None:
+                    continue
+                actual_move = price.change_24h_pct
+                break
+
+            headline_data.append(
+                {
+                    "headline": item.headline,
+                    "symbols": item.related_symbols,
+                    "actual_move_pct": actual_move,
+                }
+            )
+
+        try:
+            events = await classifier.classify_headlines(headline_data)
+            for item, event in zip(news_items, events, strict=True):
+                item.event_type = event.event_type.value
+                item.event_confidence = event.confidence
+                item.expected_car_pct = event.expected_car_pct
+                item.expected_car_window = event.expected_car_window
+                item.remaining_drift_pct = event.remaining_drift_pct
+            return news_items, events
+        except Exception:
+            logger.exception("Event classification failed; continuing without event data")
+            return news_items, []
 
     async def _fetch_earnings(self, date_value: str, watchlist_symbols: list[str]) -> list[EarningsEvent]:
         earnings = await self.finnhub.get_earnings_calendar(date_value)

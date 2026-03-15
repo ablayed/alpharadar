@@ -20,6 +20,7 @@ from src.agents.nodes.mover_selector import mover_selector_node
 from src.agents.nodes.sentiment_analyst import sentiment_analyst_node
 from src.agents.nodes.technical_analyst import technical_analyst_node
 from src.agents.state import AgentAnalysis, AnalystReport, DebateVerdict, PipelineState
+from src.events.models import DetectedEvent, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,7 @@ class AgentPipeline:
             "stock_prices": self._safe_serialize(getattr(data, "stock_prices", [])),
             "crypto_prices": self._safe_serialize(getattr(data, "crypto_prices", [])),
             "news_items": self._safe_serialize(getattr(data, "news_items", [])),
+            "event_data": self._serialize_event_data(getattr(data, "event_data", [])),
             "sec_filings": self._safe_serialize(getattr(data, "sec_filings", [])),
             "defi_movers": self._safe_serialize(getattr(data, "defi_movers", [])),
             "total_tvl": _coerce_optional_float(getattr(data, "total_tvl", None)),
@@ -157,6 +159,24 @@ class AgentPipeline:
             "market_is_open": bool(getattr(data, "market_is_open", False)),
             "is_weekend": bool(getattr(data, "is_weekend", False)),
         }
+
+    @staticmethod
+    def _serialize_event_data(items: object) -> list[dict[str, object]]:
+        if not isinstance(items, Iterable) or isinstance(items, str | bytes):
+            return []
+
+        serialized: list[dict[str, object]] = []
+        for item in items:
+            if isinstance(item, DetectedEvent):
+                payload = asdict(item)
+                event_type = payload.get("event_type")
+                if isinstance(event_type, EventType):
+                    payload["event_type"] = event_type.value
+                serialized.append(payload)
+                continue
+            if isinstance(item, dict):
+                serialized.append(dict(item))
+        return serialized
 
     @staticmethod
     def _safe_serialize(items: object) -> list[dict[str, object]]:

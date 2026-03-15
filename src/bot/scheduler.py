@@ -128,6 +128,7 @@ async def send_scheduled_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         data = await aggregator.gather_briefing_data()
+        context.bot_data["latest_briefing_data"] = data
         if data.is_weekend:
             briefing_type = "weekend"
             message = formatter.format_weekend(data)

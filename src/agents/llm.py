@@ -94,7 +94,7 @@ class GeminiClient:
         user_prompt: str,
         temperature: float = 0.2,
         max_tokens: int = 1024,
-    ) -> dict[str, object]:
+    ) -> Any:
         """
         Ask Gemini for JSON and parse the result conservatively.
         """
@@ -117,8 +117,8 @@ class GeminiClient:
             logger.warning("Failed to parse Gemini JSON response: %s", text[:200])
             return {"raw": text}
 
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict | list):
             return parsed
 
-        logger.warning("Gemini returned non-object JSON: %s", type(parsed).__name__)
+        logger.warning("Gemini returned unsupported JSON type: %s", type(parsed).__name__)
         return {"raw": text}

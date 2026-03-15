@@ -11,6 +11,9 @@ SYSTEM_PROMPT = """You are a bearish financial researcher.
 Your job is to construct the strongest possible bear case for the given asset.
 You have already seen the bull case and must directly counter it with opposing
 evidence and risk analysis.
+If calibrated event-study data is available, treat it as objective evidence:
+use adverse CAR data directly and explain when bullish event evidence looks
+fully priced or overstretched.
 
 You must argue the bear case even if you think the bull case is stronger.
 This is adversarial analysis. Do not provide financial advice.
@@ -30,6 +33,7 @@ async def bear_researcher_node(state: Mapping[str, object], llm: Any) -> dict[st
     movers = _dict_list(state.get("selected_movers"))
     bull_args = _dict_list(state.get("bull_arguments"))
     market_report = _as_mapping(state.get("market_report"))
+    event_data = _dict_list(state.get("event_data"))
 
     arguments: list[dict[str, object]] = []
     call_count = _int_or_zero(state.get("llm_call_count"))
@@ -43,6 +47,11 @@ async def bear_researcher_node(state: Mapping[str, object], llm: Any) -> dict[st
             {},
         )
         bull_case = bull_args[index] if index < len(bull_args) else {}
+        relevant_events = [
+            event
+            for event in event_data
+            if symbol.upper() in {related.upper() for related in _string_list(event.get("related_symbols"))}
+        ]
 
         user_prompt = f"""Asset: {symbol} ({asset_type})
 Current price: {_fmt_price(price_data.get('current_price'))}
@@ -54,9 +63,16 @@ Bull confidence: {bull_case.get('confidence', 'N/A')}
 
 Market context: {market_report.get('summary', 'N/A')}
 
+Calibrated event data:
+{_format_symbol_events(relevant_events)}
+
 Construct the strongest bear case for {symbol}, directly countering the bull thesis."""
 
-        result = await llm.generate_json(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+        result = await llm.generate_json(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=0.0,
+        )
         result["symbol"] = symbol
         arguments.append(result)
         call_count += 1
@@ -91,6 +107,34 @@ def _float_or_zero(value: object) -> float:
     if isinstance(value, int | float):
         return float(value)
     return 0.0
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
+
+
+def _format_symbol_events(events: list[dict[str, object]]) -> str:
+    if not events:
+        return "  None"
+
+    lines: list[str] = []
+    for event in events:
+        remaining = event.get("remaining_drift_pct")
+        remaining_text = "n/a"
+        if isinstance(remaining, int | float):
+            remaining_text = f"{float(remaining):+.1f}%"
+        lines.append(
+            "  "
+            f"{event.get('event_type', 'unknown')} "
+            f"({(_float_or_zero(event.get('confidence'))):.0%} confidence) | "
+            f"hist {_float_or_zero(event.get('expected_car_pct')):+.1f}% over "
+            f"{event.get('expected_car_window', 'N/A')} | "
+            f"current {_float_or_zero(event.get('actual_move_pct')):+.1f}% | "
+            f"remaining {remaining_text}"
+        )
+    return "\n".join(lines)
 
 
 def _int_or_zero(value: object) -> int:

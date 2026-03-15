@@ -53,7 +53,11 @@ async def sentiment_analyst_node(state: Mapping[str, object], llm: Any) -> dict[
         f"{headlines_text}\n\n"
         "Analyze the overall sentiment landscape and identify key themes."
     )
-    result = await llm.generate_json(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+    result = await llm.generate_json(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        temperature=0.0,
+    )
     return {
         "sentiment_report": result,
         "llm_call_count": current_count + 1,

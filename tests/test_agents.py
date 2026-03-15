@@ -125,8 +125,15 @@ class FakeLLM:
         self._responses = responses
         self.calls = 0
 
-    async def generate_json(self, *, system_prompt: str, user_prompt: str) -> dict[str, object]:
-        del system_prompt, user_prompt
+    async def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> object:
+        del system_prompt, user_prompt, temperature, max_tokens
         self.calls += 1
         if self._responses:
             return self._responses.pop(0)

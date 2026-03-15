@@ -58,6 +58,38 @@ def _sentiment_summary(news_items: list[NewsItem]) -> str:
     return "Sentiment: " + "  ".join(parts)
 
 
+def _format_event_annotation(news_item: NewsItem) -> str:
+    """Format an event tag and calibrated drift summary beneath a headline."""
+
+    if (
+        news_item.event_type is None
+        or news_item.event_type in {"general_news", "unknown"}
+        or (news_item.event_confidence or 0.0) < 0.6
+    ):
+        return ""
+
+    tag = f"[{html.escape(news_item.event_type, quote=False)}]"
+    if news_item.expected_car_pct is None or news_item.expected_car_window is None:
+        return f"    {tag}"
+
+    status = "typical drift captured"
+    if news_item.remaining_drift_pct is not None and abs(news_item.remaining_drift_pct) > 0.5:
+        if (
+            (news_item.expected_car_pct > 0 and news_item.remaining_drift_pct > 0)
+            or (news_item.expected_car_pct < 0 and news_item.remaining_drift_pct < 0)
+        ):
+            direction = "upside" if news_item.remaining_drift_pct > 0 else "downside"
+            status = f"remaining {abs(news_item.remaining_drift_pct):.1f}% {direction} expected"
+        else:
+            status = f"overshot by {abs(news_item.remaining_drift_pct):.1f}pp"
+
+    car_line = (
+        f"Hist. avg: {news_item.expected_car_pct:+.1f}% over {news_item.expected_car_window}  {status}"
+    )
+    car_line = BriefingFormatter._truncate(html.escape(car_line, quote=False), 80)
+    return f"    {tag}\n    <i>{car_line}</i>"
+
+
 def _market_context(
     index_prices: list[AssetPrice],
     total_tvl: float | None,
@@ -341,6 +373,9 @@ class BriefingFormatter:
                 news_item = self._news_for_symbol(item.symbol, news_items)
                 if news_item:
                     lines.append(f"    {self._truncate(self._escape(news_item.headline), 90)}")
+                    annotation = _format_event_annotation(news_item)
+                    if annotation:
+                        lines.append(annotation)
         return "\n".join(lines)
 
     def _format_crypto_section(self, crypto_prices: list[AssetPrice]) -> str:

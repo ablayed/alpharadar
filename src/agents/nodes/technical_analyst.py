@@ -56,7 +56,11 @@ async def technical_analyst_node(state: Mapping[str, object], llm: Any) -> dict[
         f"{'\n'.join(data_lines)}\n\n"
         "Analyze momentum, relative strength, and the overall market regime."
     )
-    result = await llm.generate_json(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+    result = await llm.generate_json(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        temperature=0.0,
+    )
     return {
         "technical_report": result,
         "llm_call_count": current_count + 1,

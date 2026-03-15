@@ -6,6 +6,7 @@ from src.agents.state import AgentAnalysis, DebateVerdict
 from src.briefing.formatter import (
     MAX_TELEGRAM_LENGTH,
     BriefingFormatter,
+    _format_event_annotation,
     _send_briefing_parts,
     _sentiment_indicator,
     _sentiment_summary,
@@ -52,6 +53,11 @@ def _make_news(
     label: str | None,
     score: float | None,
     confidence: float | None,
+    event_type: str | None = None,
+    event_confidence: float | None = None,
+    expected_car_pct: float | None = None,
+    expected_car_window: str | None = None,
+    remaining_drift_pct: float | None = None,
 ) -> NewsItem:
     return NewsItem(
         headline=headline,
@@ -63,6 +69,11 @@ def _make_news(
         sentiment_label=label,
         sentiment_score=score,
         sentiment_confidence=confidence,
+        event_type=event_type,
+        event_confidence=event_confidence,
+        expected_car_pct=expected_car_pct,
+        expected_car_window=expected_car_window,
+        remaining_drift_pct=remaining_drift_pct,
     )
 
 
@@ -95,6 +106,11 @@ def _sample_data(is_weekend: bool) -> BriefingData:
                 label="positive",
                 score=0.82,
                 confidence=0.91,
+                event_type="guidance_raise",
+                event_confidence=0.82,
+                expected_car_pct=2.0,
+                expected_car_window="[-1, +3] days",
+                remaining_drift_pct=1.4,
             ),
             _make_news(
                 headline="Vehicle recall pressures near-term margins",
@@ -189,6 +205,8 @@ def test_format_daily_contains_context_annotations_and_no_filler() -> None:
     assert "<i>VIX at 31 signals high fear  DeFi capital inflows accelerating</i>" in text
     assert "🟢 <b>NVDA</b> $142.30 jumping +3.2%" in text
     assert "    NVIDIA datacenter revenue beat &amp; guidance raise" in text
+    assert "    [guidance_raise]" in text
+    assert "Hist. avg: +2.0% over [-1, +3] days  remaining 1.4% upside expected" in text
     assert "🔴 <b>TSLA</b> $178.50 dipping -1.8%" in text
     assert "<b>AAPL</b> $198.20 +0.1%" in text
     assert "No significant news" not in text
@@ -287,3 +305,33 @@ def test_send_briefing_parts_splits_at_section_boundaries() -> None:
     assert len(parts) >= 2
     assert all(len(part) <= MAX_TELEGRAM_LENGTH for part in parts)
     assert any("<b>CRYPTO</b>" in part for part in parts)
+
+
+def test_format_event_annotation_skips_general_or_low_confidence_events() -> None:
+    general = _make_news(
+        headline="General update",
+        symbol="AAPL",
+        label="neutral",
+        score=0.0,
+        confidence=0.6,
+        event_type="general_news",
+        event_confidence=0.9,
+        expected_car_pct=0.0,
+        expected_car_window="N/A",
+        remaining_drift_pct=None,
+    )
+    low_confidence = _make_news(
+        headline="Possible partnership",
+        symbol="MSFT",
+        label="positive",
+        score=0.2,
+        confidence=0.7,
+        event_type="partnership",
+        event_confidence=0.4,
+        expected_car_pct=1.0,
+        expected_car_window="[-1, +3] days",
+        remaining_drift_pct=0.8,
+    )
+
+    assert _format_event_annotation(general) == ""
+    assert _format_event_annotation(low_confidence) == ""

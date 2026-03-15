@@ -61,6 +61,7 @@ class PipelineState(TypedDict, total=False):
     stock_prices: list[dict[str, object]]
     crypto_prices: list[dict[str, object]]
     news_items: list[dict[str, object]]
+    event_data: list[dict[str, object]]
     sec_filings: list[dict[str, object]]
     defi_movers: list[dict[str, object]]
     total_tvl: float | None
