@@ -89,9 +89,9 @@ def _sample_data(is_weekend: bool) -> BriefingData:
             _make_asset("VIX", AssetType.STOCK, 31.2, -9.5),
         ],
         stock_prices=[
-            _make_asset("NVDA", AssetType.STOCK, 142.3, 3.2),
-            _make_asset("TSLA", AssetType.STOCK, 178.5, -1.8),
-            _make_asset("AAPL", AssetType.STOCK, 198.2, 0.1),
+            _make_asset("NVDA", AssetType.STOCK, 142.3, 3.2, 8.4),
+            _make_asset("TSLA", AssetType.STOCK, 178.5, -1.8, -6.2),
+            _make_asset("AAPL", AssetType.STOCK, 198.2, 0.1, 0.3),
         ],
         crypto_prices=[
             _make_asset("BTC", AssetType.CRYPTO, 68420.0, 2.1, 2.1),
@@ -204,11 +204,13 @@ def test_format_daily_contains_context_annotations_and_no_filler() -> None:
     assert "QQQ: $421.15 🟢 +1.5% (NASDAQ proxy)" in text
     assert "<i>VIX at 31 signals high fear  DeFi capital inflows accelerating</i>" in text
     assert "🟢 <b>NVDA</b> $142.30 jumping +3.2%" in text
-    assert "    NVIDIA datacenter revenue beat &amp; guidance raise" in text
+    assert "(+0.82) NVIDIA datacenter revenue beat &amp; guidance raise" in text
     assert "    [guidance_raise]" in text
     assert "Hist. avg: +2.0% over [-1, +3] days  remaining 1.4% upside expected" in text
     assert "🔴 <b>TSLA</b> $178.50 dipping -1.8%" in text
+    assert "(-0.64) Vehicle recall pressures near-term margins" in text
     assert "<b>AAPL</b> $198.20 +0.1%" in text
+    assert "Apple scheduled to report earnings next Thursday" in text
     assert "No significant news" not in text
     assert "🟢 <b>SOL</b> $168.40 rallying +5.2% (7d: +12.1%  solid weekly gains)" in text
     assert "🔴 <b>FET</b> $1.82 dipping -3.1% (7d: -8.4%  weak weekly trend)" in text
@@ -217,13 +219,17 @@ def test_format_daily_contains_context_annotations_and_no_filler() -> None:
     assert "CG budget: 342/10,000  Next briefing: Tomorrow 7:00 AM" in text
 
 
-def test_format_weekend_excludes_stock_and_catalysts() -> None:
+def test_format_weekend_shows_weekly_sections_instead_of_daily_stock_blocks() -> None:
     formatter = BriefingFormatter()
     data = _sample_data(is_weekend=True)
     text = formatter.format_weekend(data)
 
     assert "<b>STOCKS</b>" not in text
     assert "<b>CATALYSTS</b>" not in text
+    assert "<b>WEEK IN REVIEW</b>" in text
+    assert "best performer" in text
+    assert "worst performer" in text
+    assert "<b>CRYPTO WEEK</b>" in text
     assert "<b>DEFI MOVERS</b>" in text
     assert "CG budget: 342/10,000  Next briefing: Tomorrow 7:00 AM" in text
 
@@ -276,7 +282,7 @@ def test_sentiment_indicator_thresholds() -> None:
     )
 
     assert _sentiment_indicator(positive) == "📈 "
-    assert _sentiment_indicator(mixed) == "📊 "
+    assert _sentiment_indicator(mixed) == "📈 "
     assert _sentiment_indicator(neutral) == ""
     assert _sentiment_indicator(negative) == "📉 "
 
@@ -335,3 +341,33 @@ def test_format_event_annotation_skips_general_or_low_confidence_events() -> Non
 
     assert _format_event_annotation(general) == ""
     assert _format_event_annotation(low_confidence) == ""
+
+
+def test_format_agent_verdict_keeps_full_text_for_analyze() -> None:
+    formatter = BriefingFormatter()
+    analysis = AgentAnalysis(
+        debate_verdicts=[
+            DebateVerdict(
+                symbol="NVDA",
+                display_name="NVDA",
+                prevailing_view="bullish",
+                confidence=0.74,
+                summary=" ".join(["Detailed"] * 120),
+                bull_thesis=" ".join(["Bull"] * 90),
+                bear_thesis=" ".join(["Bear"] * 90),
+                key_risk=" ".join(["Risk"] * 70),
+                action_context=" ".join(["Watch"] * 70),
+            )
+        ],
+        total_llm_calls=6,
+        pipeline_duration_seconds=3.2,
+    )
+
+    text = formatter.format_agent_verdict("NVDA", analysis)
+
+    assert text is not None
+    assert "Detailed Detailed Detailed" in text
+    assert "Bull Bull Bull" in text
+    assert "Bear Bear Bear" in text
+    assert "Risk Risk Risk" in text
+    assert "Watch Watch Watch" in text

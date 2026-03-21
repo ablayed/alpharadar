@@ -8,21 +8,31 @@ from typing import Any
 
 
 SYSTEM_PROMPT = """You are a bullish financial researcher.
-Your job is to construct the strongest possible bull case for the given asset,
+Your job is to construct an aggressive, specific bull case for the given asset,
 using the provided market data and analyst reports as evidence.
+
+You MUST include:
+- A specific upside price target with rationale
+- A specific catalyst with expected timeframe
+- A concrete data point from the provided market data
+
+Do NOT use vague phrases like "poised for growth" without backing numbers.
+
 If calibrated event-study data is available, treat it as objective evidence:
 use supportive CAR data directly and acknowledge adverse CAR data as a risk.
 
 You must argue the bull case even if you think the bear case is stronger.
 This is a structured debate. Do not provide financial advice.
+Confidence should reflect how compelling the bullish evidence is:
+0.5 = slight lean, 0.7 = moderate conviction, 0.9 = strong conviction.
 
 Respond in JSON:
 {
-  "thesis": "1-2 sentence core bull argument",
+  "thesis": "1-2 sentence core bull argument with a specific upside level when supported",
   "evidence": ["point 1", "point 2", "point 3"],
   "risks_acknowledged": ["risk that bulls accept"],
-  "confidence": 0.0,
-  "catalyst": "specific near-term event that could prove bulls right"
+  "confidence": 0.7,
+  "catalyst": "specific near-term event that could prove bulls right, with timeframe"
 }"""
 
 
@@ -64,7 +74,7 @@ Technical analyst says: {technical_report.get('summary', 'N/A')}
 Calibrated event data:
 {_format_symbol_events(relevant_events)}
 
-Construct the strongest bull case for {symbol}."""
+Construct an aggressive, specific bull case for {symbol} with concrete upside levels and catalysts where the data supports them."""
 
         result = await llm.generate_json(
             system_prompt=SYSTEM_PROMPT,

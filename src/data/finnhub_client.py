@@ -37,6 +37,19 @@ SHORT_NAME_VARIANTS: dict[str, list[str]] = {
     "PLTR": ["PALANTIR", "PETER THIEL"],
 }
 
+PRIMARY_SUBJECT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "NVDA": ("NVDA", "NVIDIA"),
+    "AAPL": ("AAPL", "APPLE"),
+    "MSFT": ("MSFT", "MICROSOFT"),
+    "GOOGL": ("GOOGL", "GOOGLE", "ALPHABET"),
+    "META": ("META", "META PLATFORMS", "FACEBOOK"),
+    "AMZN": ("AMZN", "AMAZON"),
+    "AMD": ("AMD", "ADVANCED MICRO", "ADVANCED MICRO DEVICES"),
+    "TSLA": ("TSLA", "TESLA"),
+    "ARM": ("ARM", "ARM HOLDINGS"),
+    "PLTR": ("PLTR", "PALANTIR"),
+}
+
 COMPANY_SUFFIXES: tuple[str, ...] = (
     " INCORPORATED",
     " INC",
@@ -78,19 +91,7 @@ def _company_name_variants(company_name: str) -> set[str]:
     return {variant for variant in variants if len(variant) >= 3}
 
 
-def _is_relevant_news(
-    headline: str,
-    summary: str,
-    symbol: str,
-    company_name: str | None,
-) -> bool:
-    """
-    Check whether a news item clearly refers to the requested company.
-
-    A hit requires either the ticker as a whole word, a company-name match,
-    or one of the curated short-name variants for the symbol.
-    """
-    text = f"{headline} {summary}".upper()
+def _company_in_text(text: str, symbol: str, company_name: str | None) -> bool:
     symbol_upper = symbol.upper()
 
     if re.search(rf"\b{re.escape(symbol_upper)}\b", text):
@@ -106,6 +107,34 @@ def _is_relevant_news(
             return True
 
     return False
+
+
+def _is_relevant_news(
+    headline: str,
+    summary: str,
+    symbol: str,
+    company_name: str | None,
+) -> bool:
+    """Check whether a news item clearly refers to the requested company."""
+    text = f"{headline} {summary}".upper()
+    symbol_upper = symbol.upper()
+    if not _company_in_text(text, symbol_upper, company_name):
+        return False
+
+    headline_upper = re.sub(r"\s+", " ", headline.upper()).strip()
+    for other_symbol, prefixes in PRIMARY_SUBJECT_PREFIXES.items():
+        if other_symbol == symbol_upper:
+            continue
+        for prefix in prefixes:
+            if (
+                headline_upper == prefix
+                or headline_upper.startswith(f"{prefix} ")
+                or headline_upper.startswith(f"{prefix}:")
+                or headline_upper.startswith(f"{prefix},")
+            ):
+                return False
+
+    return True
 
 
 class FinnhubQuoteResponse(BaseModel):
@@ -150,6 +179,11 @@ class FinnhubEarningsEntry(BaseModel):
 
 class FinnhubEarningsResponse(BaseModel):
     earningsCalendar: list[FinnhubEarningsEntry] = Field(default_factory=list)
+
+
+class FinnhubCandleResponse(BaseModel):
+    c: list[float] = Field(default_factory=list)
+    s: str = "no_data"
 
 
 class FinnhubClient(BaseDataProvider):
@@ -204,12 +238,17 @@ class FinnhubClient(BaseDataProvider):
             ttl_seconds=ttl,
         )
         quote = FinnhubQuoteResponse.model_validate(payload)
+        weekly_change: float | None = None
+        try:
+            weekly_change = await self._get_weekly_change(symbol)
+        except Exception:
+            logger.warning("Failed to fetch 7d stock change for %s", symbol.upper(), exc_info=True)
         return AssetPrice(
             symbol=symbol.upper(),
             asset_type=AssetType.STOCK,
             current_price=float(quote.c),
             change_24h_pct=float(quote.dp),
-            change_7d_pct=None,
+            change_7d_pct=weekly_change,
             high_24h=(float(quote.h) if quote.h != 0 else None),
             low_24h=(float(quote.low) if quote.low != 0 else None),
             market_cap=None,
@@ -308,6 +347,34 @@ class FinnhubClient(BaseDataProvider):
             )
             for item in calendar.earningsCalendar
         ]
+
+    async def _get_weekly_change(self, symbol: str) -> float | None:
+        today = date.today()
+        from_date = today - timedelta(days=8)
+        to_dt = datetime.combine(today, datetime.min.time(), tzinfo=UTC)
+        from_dt = datetime.combine(from_date, datetime.min.time(), tzinfo=UTC)
+        cache_key = f"finnhub:candle:{symbol.upper()}:{from_date.isoformat()}:{today.isoformat()}"
+        payload = await self._request_json(
+            endpoint="/stock/candle",
+            params={
+                "symbol": symbol.upper(),
+                "resolution": "D",
+                "from": int(from_dt.timestamp()),
+                "to": int(to_dt.timestamp()),
+            },
+            cache_key=cache_key,
+            ttl_seconds=3_600,
+        )
+        candle = FinnhubCandleResponse.model_validate(payload)
+        closes = [float(value) for value in candle.c if float(value) > 0]
+        if candle.s != "ok" or len(closes) < 2:
+            return None
+
+        start = closes[0]
+        end = closes[-1]
+        if start <= 0:
+            return None
+        return ((end - start) / start) * 100
 
     async def _request_json(
         self,

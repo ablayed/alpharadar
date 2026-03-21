@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from src.briefing.formatter import BriefingFormatter, _send_briefing_parts
+from src.bot.messages import _send_long_message
+from src.briefing.formatter import BriefingFormatter
 from src.briefing.models import BriefingData
 from src.config import settings
 from src.data.aggregator import DataAggregator
@@ -72,6 +73,7 @@ def _help_text() -> str:
         "/remove TSLA  Remove from watchlist\n"
         "/sentiment &lt;text&gt;  Analyze ad hoc sentiment\n"
         "/analyze NVDA  Run Bull/Bear AI debate for one symbol\n"
+        "/playbook  Daily actionable breakdown for all notable assets\n"
         "/events  Show latest detected events\n"
         "/status  API usage and system health\n"
         "/help  Show this message"
@@ -115,10 +117,12 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         data = await aggregator.gather_briefing_data()
         _store_latest_briefing(context, data)
         briefing_html = formatter.format_on_demand(data)
-        parts = _send_briefing_parts(briefing_html)
-        await msg.edit_text(parts[0])
-        for part in parts[1:]:
-            await context.bot.send_message(chat_id=chat.id, text=part)
+        await _send_long_message(
+            context.bot,
+            chat.id,
+            briefing_html,
+            initial_message=msg,
+        )
         status = "partial" if data.failed_sections else "sent"
         await db.log_briefing("on_demand", len(briefing_html), status, sections=data.failed_sections)
     except Exception as exc:
@@ -194,11 +198,51 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"\u26A0\uFE0F Agent pipeline ran but produced no verdict for {html.escape(symbol)}."
             )
             return
-        await msg.edit_text(response)
+        await _send_long_message(
+            context.bot,
+            update.effective_chat.id if update.effective_chat is not None else settings.telegram_chat_id,
+            response,
+            initial_message=msg,
+        )
     except Exception as exc:
         logger.exception("Analyze command failed for %s", symbol)
         escaped_error = html.escape(str(exc), quote=False)
         await msg.edit_text(f"\u26A0\uFE0F Analysis failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def playbook_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a full daily playbook with actionable context for every notable asset."""
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    msg = await update.message.reply_text("\U0001F4CB Building daily playbook...")
+    aggregator = _aggregator_from_context(context)
+
+    try:
+        data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+        _store_latest_briefing(context, data)
+        playbook_text, llm_calls, duration = await aggregator.generate_playbook(data)
+        message = _format_playbook_message(
+            generated_at=data.generated_at,
+            playbook_text=playbook_text,
+            llm_calls=llm_calls,
+            duration=duration,
+        )
+        await _send_long_message(
+            context.bot,
+            chat.id,
+            message,
+            initial_message=msg,
+        )
+    except Exception as exc:
+        logger.exception("Playbook command failed")
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Playbook failed.\n<i>{escaped_error[:250]}</i>")
 
 
 async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,7 +283,12 @@ async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if no_event_symbols:
             lines.append(f"No event detected: {', '.join(no_event_symbols)}")
 
-        await msg.edit_text("\n".join(lines).strip())
+        await _send_long_message(
+            context.bot,
+            update.effective_chat.id if update.effective_chat is not None else settings.telegram_chat_id,
+            "\n".join(lines).strip(),
+            initial_message=msg,
+        )
     except Exception as exc:
         logger.exception("Events command failed")
         escaped_error = html.escape(str(exc), quote=False)
@@ -562,6 +611,26 @@ async def _latest_briefing_data(context: ContextTypes.DEFAULT_TYPE) -> BriefingD
 
 def _store_latest_briefing(context: ContextTypes.DEFAULT_TYPE, data: BriefingData) -> None:
     context.bot_data["latest_briefing_data"] = data
+
+
+def _format_playbook_message(
+    *,
+    generated_at: datetime,
+    playbook_text: str,
+    llm_calls: int,
+    duration: float,
+) -> str:
+    header = (
+        "\U0001F4CB <b>ALPHARADAR DAILY PLAYBOOK</b>\n"
+        f"{generated_at.strftime('%A')}, {generated_at.strftime('%B')} "
+        f"{generated_at.day} {generated_at.year}"
+    )
+    body = html.escape(playbook_text.strip(), quote=False) if playbook_text.strip() else "No playbook generated."
+    footer = ""
+    if llm_calls > 0:
+        label = "call" if llm_calls == 1 else "calls"
+        footer = f"<i>\U0001F9E0 {llm_calls} LLM {label} in {duration:.1f}s</i>"
+    return "\n\n".join(part for part in [header, body, footer] if part)
 
 
 def _relevant_events(data: BriefingData) -> list[DetectedEvent]:

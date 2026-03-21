@@ -186,6 +186,30 @@ async def test_mover_selector_forced_symbols_override_default_logic() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mover_selector_weekend_returns_top_stock_and_crypto_by_week() -> None:
+    state = {
+        "stock_prices": [
+            {"symbol": "NVDA", "change_24h_pct": 0.4, "change_7d_pct": 8.5},
+            {"symbol": "TSLA", "change_24h_pct": -0.3, "change_7d_pct": -6.2},
+        ],
+        "crypto_prices": [
+            {"symbol": "BTC", "change_24h_pct": 1.1, "change_7d_pct": 5.5},
+            {"symbol": "SOL", "change_24h_pct": 2.4, "change_7d_pct": 12.1},
+        ],
+        "sec_filings": [],
+        "news_items": [],
+        "is_weekend": True,
+    }
+
+    result = await mover_selector_node(state)
+
+    assert result["selected_movers"] == [
+        {"symbol": "NVDA", "asset_type": "stock", "reason": "Largest weekly stock move (+8.5%)"},
+        {"symbol": "SOL", "asset_type": "crypto", "reason": "Largest weekly crypto move (+12.1%)"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_agent_pipeline_builds_analysis_from_mock_llm() -> None:
     pytest.importorskip("langgraph")
     from src.agents.graph import AgentPipeline

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar, cast
 from zoneinfo import ZoneInfo
@@ -35,6 +36,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+
+PLAYBOOK_SYSTEM_PROMPT = """You are a concise financial analyst creating a daily playbook.
+For each asset provided, write a brief actionable paragraph in this exact format:
+
+SYMBOL (current_price, change%)
+What happened: [1 sentence on the key event or move]
+What it means: [1 sentence on why this matters]
+Historical context: [1 sentence using CAR data if available]
+Watch for: [1 specific trigger - price level, event, or date]
+Scenario: If [X happens], expect [Y]. If [Z happens], expect [W].
+
+Rules:
+- Be specific with numbers such as price levels, percentages, and dates.
+- Reference the detected event type and CAR data when available.
+- Do NOT give buy or sell advice. Frame everything as information and scenarios.
+- Keep each asset to exactly 6 lines as shown above.
+- Include both stocks and crypto in the same response.
+- Do not use markdown bullets, code fences, or extra commentary."""
 
 
 class DataAggregator:
@@ -196,17 +215,24 @@ class DataAggregator:
         )
 
         company_names = {item.symbol.upper(): item.display_name for item in stock_items}
-        headline_symbols = [item.symbol for item in stock_prices if abs(item.change_24h_pct) > 1.5]
         news_items: list[NewsItem] = []
         event_data: list[DetectedEvent] = []
-        if headline_symbols and not is_weekend:
+        if stock_symbols:
             try:
-                news_items = await self._fetch_news(headline_symbols, company_names)
-                news_items = await self._enrich_with_sentiment(news_items)
-                news_items, event_data = await self._enrich_with_events(
-                    news_items,
-                    [*stock_prices, *crypto_prices],
-                )
+                news_items = await self._fetch_news(stock_symbols, company_names)
+                if news_items:
+                    logger.info(
+                        "Events: classifying %s relevant headline(s) across the watchlist (weekend=%s)",
+                        len(news_items),
+                        is_weekend,
+                    )
+                    news_items = await self._enrich_with_sentiment(news_items)
+                    news_items, event_data = await self._enrich_with_events(
+                        news_items,
+                        [*stock_prices, *crypto_prices],
+                    )
+                else:
+                    logger.info("Events: no relevant headlines found for the watchlist")
             except Exception:
                 logger.exception("Failed to fetch company news")
                 failed_sections.append("news")
@@ -434,6 +460,126 @@ class DataAggregator:
         )
         return analysis
 
+    async def generate_playbook(self, briefing_data: BriefingData) -> tuple[str, int, float]:
+        notable_assets = self._notable_assets_for_playbook(briefing_data)
+        if not notable_assets:
+            return ("No assets met today's notable threshold.", 0, 0.0)
+
+        llm = await self._ensure_llm_client()
+        if llm is None:
+            raise RuntimeError("Groq client is not available")
+
+        asset_blocks: list[str] = []
+        for asset in notable_assets:
+            asset_blocks.append(
+                "\n".join(
+                    [
+                        f"{asset['symbol']} ({asset['asset_type']}):",
+                        f"  Price: {asset['price_text']}",
+                        f"  24h change: {asset['change_24h_pct']:+.1f}%",
+                        f"  7d change: {asset['change_7d_text']}",
+                        f"  Sentiment: {asset['sentiment_label']} ({asset['sentiment_score_text']})",
+                        f"  Event: {asset['event_type']} (confidence: {asset['event_confidence_text']})",
+                        f"  Historical CAR: {asset['expected_car_text']} over {asset['expected_car_window']}",
+                        f"  Remaining drift: {asset['remaining_drift_text']}",
+                        f"  Latest headline: {asset['headline']}",
+                    ]
+                )
+            )
+
+        user_prompt = (
+            "Create a daily playbook for these assets:\n\n"
+            + "\n\n".join(asset_blocks)
+            + "\n\nGenerate the playbook following the exact format specified."
+        )
+
+        started_at = time.perf_counter()
+        response = await llm.generate(
+            system_prompt=PLAYBOOK_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=0.1,
+            max_tokens=max(900, min(2600, 220 * len(notable_assets))),
+        )
+        duration = round(time.perf_counter() - started_at, 1)
+        return response.strip(), 1, duration
+
+    def _notable_assets_for_playbook(self, briefing_data: BriefingData) -> list[dict[str, object]]:
+        latest_news_by_symbol: dict[str, NewsItem] = {}
+        for item in briefing_data.news_items:
+            for symbol in item.related_symbols:
+                latest_news_by_symbol.setdefault(symbol.upper(), item)
+
+        strongest_event_by_symbol: dict[str, DetectedEvent] = {}
+        for event in briefing_data.event_data:
+            if event.event_type.value in {"general_news", "unknown"}:
+                continue
+            for symbol in event.related_symbols:
+                existing = strongest_event_by_symbol.get(symbol.upper())
+                if existing is None or event.confidence > existing.confidence:
+                    strongest_event_by_symbol[symbol.upper()] = event
+
+        notable_assets: list[dict[str, object]] = []
+        for price in [*briefing_data.stock_prices, *briefing_data.crypto_prices]:
+            symbol_upper = price.symbol.upper()
+            news_item = latest_news_by_symbol.get(symbol_upper)
+            event = strongest_event_by_symbol.get(symbol_upper)
+            has_event = event is not None
+            if price.asset_type == AssetType.STOCK:
+                is_notable = abs(price.change_24h_pct) > 1.0 or has_event
+            else:
+                is_notable = abs(price.change_24h_pct) > 3.0 or has_event
+            if not is_notable:
+                continue
+
+            notable_assets.append(
+                {
+                    "symbol": symbol_upper,
+                    "asset_type": price.asset_type.value,
+                    "current_price": price.current_price,
+                    "price_text": self._playbook_price_text(price),
+                    "change_24h_pct": price.change_24h_pct,
+                    "change_7d_text": self._playbook_pct_text(price.change_7d_pct),
+                    "sentiment_label": news_item.sentiment_label if news_item and news_item.sentiment_label else "N/A",
+                    "sentiment_score_text": self._playbook_pct_score(news_item.sentiment_score if news_item else None),
+                    "event_type": event.event_type.value if event is not None else "none",
+                    "event_confidence_text": f"{event.confidence:.0%}" if event is not None else "N/A",
+                    "expected_car_text": self._playbook_pct_text(event.expected_car_pct if event is not None else None),
+                    "expected_car_window": event.expected_car_window if event and event.expected_car_window else "N/A",
+                    "remaining_drift_text": self._playbook_pct_text(event.remaining_drift_pct if event is not None else None),
+                    "headline": news_item.headline if news_item is not None else "N/A",
+                    "sort_key": (
+                        1 if has_event else 0,
+                        abs(price.change_24h_pct),
+                        abs(price.change_7d_pct or 0.0),
+                    ),
+                }
+            )
+
+        notable_assets.sort(key=lambda asset: cast(tuple[float, float, float], asset["sort_key"]), reverse=True)
+        return notable_assets
+
+    @staticmethod
+    def _playbook_pct_text(value: float | None) -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:+.1f}%"
+
+    @staticmethod
+    def _playbook_pct_score(value: float | None) -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:+.2f}"
+
+    @staticmethod
+    def _playbook_price_text(price: AssetPrice) -> str:
+        if price.asset_type == AssetType.STOCK:
+            return f"${price.current_price:,.2f}"
+        if price.current_price >= 1_000:
+            return f"${price.current_price:,.0f}"
+        if price.current_price >= 1:
+            return f"${price.current_price:,.2f}"
+        return f"${price.current_price:.4g}"
+
     async def _ensure_agent_pipeline(self) -> AgentPipeline | None:
         if self.settings.gemini_api_key is None:
             return None
@@ -442,12 +588,9 @@ class DataAggregator:
 
         try:
             from src.agents.graph import AgentPipeline
-            from src.agents.llm import GeminiClient
-
-            api_key = self.settings.gemini_api_key.get_secret_value()
-            gemini = GeminiClient(api_key=api_key)
-            await gemini.initialize()
-            self._gemini_client = gemini
+            gemini = await self._ensure_llm_client()
+            if gemini is None:
+                return None
             self._agent_pipeline = AgentPipeline(gemini_client=gemini)
             self._agent_pipeline_init_error = None
         except Exception as exc:
@@ -457,6 +600,20 @@ class DataAggregator:
             logger.exception("Agent pipeline initialization failed; continuing without Groq")
 
         return self._agent_pipeline
+
+    async def _ensure_llm_client(self) -> GeminiClient | None:
+        if self.settings.gemini_api_key is None:
+            return None
+        if self._gemini_client is not None:
+            return self._gemini_client
+
+        from src.agents.llm import GeminiClient
+
+        api_key = self.settings.gemini_api_key.get_secret_value()
+        gemini = GeminiClient(api_key=api_key)
+        await gemini.initialize()
+        self._gemini_client = gemini
+        return gemini
 
     @staticmethod
     def _result_or_default(

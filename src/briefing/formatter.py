@@ -10,7 +10,7 @@ from src.config import settings
 from src.data.base import AssetPrice, DeFiProtocol, NewsItem, SECFiling
 
 MAX_TELEGRAM_LENGTH = 4_096
-AI_VERDICT_MAX_LENGTH = 700
+TELEGRAM_SPLIT_MARGIN = 100
 INDEX_PROXY_NOTES: dict[str, str] = {
     "SPY": "S&P 500 proxy",
     "QQQ": "NASDAQ proxy",
@@ -26,12 +26,28 @@ def _sentiment_indicator(news_item: NewsItem) -> str:
     score = news_item.sentiment_score
     confidence = news_item.sentiment_confidence or 0.0
 
-    if score > 0.3 and confidence >= 0.7:
+    if score > 0.15 and confidence >= 0.5:
         return "📈 "
-    if score < -0.3 and confidence >= 0.7:
+    if score < -0.15 and confidence >= 0.5:
         return "📉 "
-    if abs(score) > 0.1:
-        return "📊 "
+    return ""
+
+
+def _sentiment_score_text(news_item: NewsItem) -> str:
+    if news_item.sentiment_score is None or abs(news_item.sentiment_score) <= 0.15:
+        return ""
+    return f"({news_item.sentiment_score:+.2f})"
+
+
+def _headline_prefix(news_item: NewsItem) -> str:
+    indicator = _sentiment_indicator(news_item)
+    score = _sentiment_score_text(news_item)
+    if indicator and score:
+        return f"{indicator}{score} "
+    if indicator:
+        return indicator
+    if score:
+        return f"{score} "
     return ""
 
 
@@ -86,8 +102,7 @@ def _format_event_annotation(news_item: NewsItem) -> str:
     car_line = (
         f"Hist. avg: {news_item.expected_car_pct:+.1f}% over {news_item.expected_car_window}  {status}"
     )
-    car_line = BriefingFormatter._truncate(html.escape(car_line, quote=False), 80)
-    return f"    {tag}\n    <i>{car_line}</i>"
+    return f"    {tag}\n    <i>{html.escape(car_line, quote=False)}</i>"
 
 
 def _market_context(
@@ -174,24 +189,28 @@ def _trend_context(change_7d: float | None) -> str:
 
 
 def _split_long_block(block: str) -> list[str]:
+    safe_limit = MAX_TELEGRAM_LENGTH - TELEGRAM_SPLIT_MARGIN
     parts: list[str] = []
     current = ""
 
     for line in block.splitlines():
-        if len(line) > MAX_TELEGRAM_LENGTH:
+        if len(line) > safe_limit:
             if current:
                 parts.append(current)
                 current = ""
             remainder = line
-            while len(remainder) > MAX_TELEGRAM_LENGTH:
-                parts.append(remainder[:MAX_TELEGRAM_LENGTH])
-                remainder = remainder[MAX_TELEGRAM_LENGTH:]
+            while len(remainder) > safe_limit:
+                split_at = remainder.rfind(" ", 0, safe_limit)
+                if split_at <= 0:
+                    split_at = safe_limit
+                parts.append(remainder[:split_at].rstrip())
+                remainder = remainder[split_at:].lstrip()
             if remainder:
                 current = remainder
             continue
 
         candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > MAX_TELEGRAM_LENGTH and current:
+        if len(candidate) > safe_limit and current:
             parts.append(current)
             current = line
         else:
@@ -199,12 +218,13 @@ def _split_long_block(block: str) -> list[str]:
 
     if current:
         parts.append(current)
-    return parts or [block[:MAX_TELEGRAM_LENGTH]]
+    return parts or [block[:safe_limit]]
 
 
 def _send_briefing_parts(message: str) -> list[str]:
     """Split a long briefing into multiple Telegram messages."""
-    if len(message) <= MAX_TELEGRAM_LENGTH:
+    safe_limit = MAX_TELEGRAM_LENGTH - TELEGRAM_SPLIT_MARGIN
+    if len(message) <= safe_limit:
         return [message]
 
     sections = [section.strip() for section in message.split("\n\n") if section.strip()]
@@ -212,7 +232,7 @@ def _send_briefing_parts(message: str) -> list[str]:
     current = ""
 
     for section in sections:
-        if len(section) > MAX_TELEGRAM_LENGTH:
+        if len(section) > safe_limit:
             if current:
                 parts.append(current)
                 current = ""
@@ -220,7 +240,7 @@ def _send_briefing_parts(message: str) -> list[str]:
             continue
 
         candidate = f"{current}\n\n{section}" if current else section
-        if len(candidate) > MAX_TELEGRAM_LENGTH and current:
+        if len(candidate) > safe_limit and current:
             parts.append(current)
             current = section
         else:
@@ -229,7 +249,7 @@ def _send_briefing_parts(message: str) -> list[str]:
     if current:
         parts.append(current)
 
-    return parts if parts else [message[:MAX_TELEGRAM_LENGTH]]
+    return parts if parts else [message[:safe_limit]]
 
 
 class BriefingFormatter:
@@ -281,7 +301,8 @@ class BriefingFormatter:
         if weekend:
             sections.extend(
                 [
-                    self._format_crypto_section(data.crypto_prices),
+                    self._format_week_in_review(data.stock_prices),
+                    self._format_crypto_week(data.crypto_prices),
                     self._format_ai_deep_dive(data.agent_analysis),
                     self._format_defi_movers(data.defi_movers),
                 ]
@@ -369,10 +390,10 @@ class BriefingFormatter:
 
         for item in stocks:
             lines.append(self._format_asset_line(item, asset_type="stock"))
-            if include_headlines and abs(item.change_24h_pct) > 1.5:
+            if include_headlines:
                 news_item = self._news_for_symbol(item.symbol, news_items)
                 if news_item:
-                    lines.append(f"    {self._truncate(self._escape(news_item.headline), 90)}")
+                    lines.append(self._format_news_line(news_item))
                     annotation = _format_event_annotation(news_item)
                     if annotation:
                         lines.append(annotation)
@@ -392,20 +413,19 @@ class BriefingFormatter:
         if analysis is None or not analysis.debate_verdicts:
             return ""
 
-        lines = ["\U0001F916 <b>AI DEEP DIVE</b>"]
+        lines = ["🤖 <b>AI DEEP DIVE</b>"]
         for verdict in analysis.debate_verdicts[:2]:
             lines.append(
                 "\n".join(
                     self._ai_verdict_lines(
                         verdict,
                         include_symbol_header=True,
-                        max_length=AI_VERDICT_MAX_LENGTH,
                     )
                 )
             )
 
         lines.append(
-            f"<i>\U0001F9E0 Pipeline: {analysis.total_llm_calls} LLM calls in "
+            f"<i>🧠 Pipeline: {analysis.total_llm_calls} LLM calls in "
             f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>"
         )
         return "\n\n".join(line for line in lines if line)
@@ -420,15 +440,15 @@ class BriefingFormatter:
             return None
 
         lines = [
-            f"\U0001F916 <b>Agent Analysis: {self._escape(symbol_upper)}</b>",
+            f"🤖 <b>Agent Analysis: {self._escape(symbol_upper)}</b>",
             "",
             *self._ai_verdict_lines(
                 verdict,
                 include_symbol_header=False,
-                max_length=1200,
+                full_text=True,
             ),
             "",
-            f"<i>\U0001F9E0 {analysis.total_llm_calls} LLM calls in "
+            f"<i>🧠 {analysis.total_llm_calls} LLM calls in "
             f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>",
         ]
         return "\n".join(lines)
@@ -439,11 +459,11 @@ class BriefingFormatter:
         if data.earnings_today:
             for event in data.earnings_today[:5]:
                 lines.append(
-                    f"📅 {self._escape(event.symbol)} earnings call "
+                    f"🗓 {self._escape(event.symbol)} earnings call "
                     f"({self._escape(self._earnings_window(event.hour))})"
                 )
         else:
-            lines.append("📅 No major catalysts today.")
+            lines.append("🗓 No major catalysts today.")
 
         for filing in data.sec_filings[:5]:
             lines.append(self._format_filing_line(filing))
@@ -454,73 +474,116 @@ class BriefingFormatter:
         verdict: DebateVerdict,
         *,
         include_symbol_header: bool,
-        max_length: int,
+        full_text: bool = False,
     ) -> list[str]:
-        summary = self._sanitize_ai_text(verdict.summary, 140)
-        bull = self._sanitize_ai_text(verdict.bull_thesis, 95)
-        bear = self._sanitize_ai_text(verdict.bear_thesis, 95)
-        risk = self._sanitize_ai_text(verdict.key_risk, 80)
-        watch = self._sanitize_ai_text(verdict.action_context, 80)
+        summary = self._sanitize_ai_text(verdict.summary, None if full_text else 500)
+        bull = self._sanitize_ai_text(verdict.bull_thesis, None if full_text else 400)
+        bear = self._sanitize_ai_text(verdict.bear_thesis, None if full_text else 400)
+        risk = self._sanitize_ai_text(verdict.key_risk, None if full_text else 300)
+        watch = self._sanitize_ai_text(verdict.action_context, None if full_text else 300)
 
-        while True:
-            lines: list[str] = []
-            if include_symbol_header:
-                lines.append(self._format_ai_symbol_header(verdict))
-            lines.append(
-                f"{self._view_emoji(verdict.prevailing_view)} <b>Verdict:</b> "
-                f"{verdict.prevailing_view.title()} ({verdict.confidence:.0%} confidence)"
-            )
-            if summary:
-                lines.extend(["", summary])
-            if bull:
-                lines.extend(["", f"\U0001F4C8 <b>Bulls say:</b> {bull}"])
-            if bear:
-                lines.append(f"\U0001F4C9 <b>Bears say:</b> {bear}")
-            if risk:
-                lines.append(f"\u26A0\uFE0F <b>Key risk:</b> {risk}")
-            if watch:
-                lines.append(f"\U0001F441 <b>Watch:</b> {watch}")
-
-            block = "\n".join(lines)
-            if len(block) <= max_length:
-                return lines
-
-            overflow = len(block) - max_length + 3
-            if len(summary) > 40:
-                summary = self._truncate(summary, max(40, len(summary) - overflow))
-                continue
-            if len(bull) > 32:
-                bull = self._truncate(bull, max(32, len(bull) - overflow))
-                continue
-            if len(bear) > 32:
-                bear = self._truncate(bear, max(32, len(bear) - overflow))
-                continue
-            if len(risk) > 24:
-                risk = self._truncate(risk, max(24, len(risk) - overflow))
-                continue
-            if len(watch) > 24:
-                watch = self._truncate(watch, max(24, len(watch) - overflow))
-                continue
-            return [self._truncate(block, max_length)]
+        lines: list[str] = []
+        if include_symbol_header:
+            lines.append(self._format_ai_symbol_header(verdict))
+        lines.append(
+            f"{self._view_emoji(verdict.prevailing_view)} <b>Verdict:</b> "
+            f"{verdict.prevailing_view.title()} ({verdict.confidence:.0%} confidence)"
+        )
+        if summary:
+            lines.extend(["", summary])
+        if bull:
+            lines.extend(["", f"📈 <b>Bulls say:</b> {bull}"])
+        if bear:
+            lines.append(f"📉 <b>Bears say:</b> {bear}")
+        if risk:
+            lines.append(f"⚠️ <b>Key risk:</b> {risk}")
+        if watch:
+            lines.append(f"👁 <b>Watch:</b> {watch}")
+        return lines
 
     def _format_ai_symbol_header(self, verdict: DebateVerdict) -> str:
         selection_suffix = ""
         if verdict.selection_reason:
             selection_suffix = f" (selected: {self._escape(verdict.selection_reason)})"
-        return f"\U0001F4CA <b>{self._escape(verdict.display_name)}</b>{selection_suffix}"
+        return f"📊 <b>{self._escape(verdict.display_name)}</b>{selection_suffix}"
 
-    def _sanitize_ai_text(self, value: str, limit: int) -> str:
+    def _sanitize_ai_text(self, value: str, limit: int | None) -> str:
         collapsed = " ".join(value.split())
         escaped = self._escape(collapsed)
+        if limit is None:
+            return escaped
         return self._truncate(escaped, limit)
+
+    def _format_news_line(self, news_item: NewsItem) -> str:
+        prefix = _headline_prefix(news_item)
+        return f"    {prefix}{self._escape(news_item.headline)}"
+
+    def _format_week_in_review(self, stock_prices: list[AssetPrice]) -> str:
+        lines = ["🗓 <b>WEEK IN REVIEW</b>"]
+        if not stock_prices:
+            lines.append("No stock data available.")
+            return "\n".join(lines)
+
+        ranked = sorted(stock_prices, key=self._weekly_change_for_ranking, reverse=True)
+        best_symbol = ranked[0].symbol if ranked else ""
+        worst_symbol = ranked[-1].symbol if ranked else ""
+
+        for item in ranked:
+            weekly_change = self._weekly_change_for_ranking(item)
+            marker = self._indicator(weekly_change) or "⚪"
+            suffix = ""
+            if item.symbol == best_symbol:
+                suffix = " (best performer)"
+            elif item.symbol == worst_symbol:
+                suffix = " (worst performer)"
+            lines.append(
+                f"{marker} <b>{self._escape(item.symbol)}</b> {self._format_pct(weekly_change)}{suffix}"
+            )
+
+        return "\n".join(lines)
+
+    def _format_crypto_week(self, crypto_prices: list[AssetPrice]) -> str:
+        lines = ["🏅 <b>CRYPTO WEEK</b>"]
+        if not crypto_prices:
+            lines.append("No crypto data available.")
+            return "\n".join(lines)
+
+        ranked = sorted(crypto_prices, key=self._weekly_change_for_ranking, reverse=True)
+        medals = ["🏆", "🥈", "🥉"]
+        for idx, item in enumerate(ranked[:5]):
+            marker = medals[idx] if idx < len(medals) else (self._indicator(self._weekly_change_for_ranking(item)) or "⚪")
+            lines.append(
+                f"{marker} <b>{self._escape(item.symbol)}</b> "
+                f"{self._format_pct(self._weekly_change_for_ranking(item))} "
+                f"({self._crypto_week_context(item)})"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _weekly_change_for_ranking(item: AssetPrice) -> float:
+        if item.change_7d_pct is not None:
+            return item.change_7d_pct
+        return item.change_24h_pct
+
+    def _crypto_week_context(self, item: AssetPrice) -> str:
+        weekly_change = self._weekly_change_for_ranking(item)
+        if weekly_change >= 30:
+            return f"momentum remains strong, {self._format_pct(item.change_24h_pct)} today"
+        if weekly_change >= 15:
+            return f"strong weekly trend, {self._format_pct(item.change_24h_pct)} today"
+        if weekly_change <= -15:
+            return f"heavy weekly losses, {self._format_pct(item.change_24h_pct)} today"
+        if weekly_change <= -5:
+            return f"pressure remains elevated, {self._format_pct(item.change_24h_pct)} today"
+        return f"weekly range still forming, {self._format_pct(item.change_24h_pct)} today"
 
     @staticmethod
     def _view_emoji(view: str) -> str:
         if view == "bullish":
-            return "\U0001F4C8"
+            return "📈"
         if view == "bearish":
-            return "\U0001F4C9"
-        return "\u2696\uFE0F"
+            return "📉"
+        return "⚖️"
 
     @staticmethod
     def _format_duration(value: float) -> str:

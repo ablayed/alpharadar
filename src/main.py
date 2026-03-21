@@ -24,6 +24,7 @@ from src.bot.handlers import (
     events_command,
     handle_asset_type_callback,
     help_command,
+    playbook_command,
     remove_command,
     sentiment_command,
     start_command,
@@ -106,6 +107,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("briefing", briefing_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("playbook", playbook_command))
     application.add_handler(CommandHandler("events", events_command))
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("add", add_command))

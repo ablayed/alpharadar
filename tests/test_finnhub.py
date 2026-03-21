@@ -164,3 +164,12 @@ def test_is_relevant_news_requires_symbol_or_company_match() -> None:
         "NVDA",
         "NVIDIA",
     )
+
+
+def test_is_relevant_news_rejects_headline_led_by_other_company() -> None:
+    assert not _is_relevant_news(
+        "NVIDIA partners with ByteDance on new AI systems",
+        "Google Cloud was briefly mentioned as an industry comparison.",
+        "GOOGL",
+        "Google",
+    )

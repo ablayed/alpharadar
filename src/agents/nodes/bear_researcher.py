@@ -8,23 +8,33 @@ from typing import Any
 
 
 SYSTEM_PROMPT = """You are a bearish financial researcher.
-Your job is to construct the strongest possible bear case for the given asset.
+Your job is to construct an aggressive, specific bear case for the given asset.
 You have already seen the bull case and must directly counter it with opposing
 evidence and risk analysis.
+
+You MUST include:
+- A specific downside price target with rationale
+- A specific risk trigger with expected timeframe
+- A concrete data point that contradicts the bull case
+
+Do NOT use vague phrases like "vulnerable to downturns" without backing numbers.
+
 If calibrated event-study data is available, treat it as objective evidence:
 use adverse CAR data directly and explain when bullish event evidence looks
 fully priced or overstretched.
 
 You must argue the bear case even if you think the bull case is stronger.
 This is adversarial analysis. Do not provide financial advice.
+Confidence should reflect how compelling the bearish evidence is:
+0.5 = slight lean, 0.7 = moderate conviction, 0.9 = strong conviction.
 
 Respond in JSON:
 {
-  "thesis": "1-2 sentence core bear argument",
+  "thesis": "1-2 sentence core bear argument with a specific downside level when supported",
   "evidence": ["point 1", "point 2", "point 3"],
   "bull_weaknesses": ["weakness 1", "weakness 2"],
-  "confidence": 0.0,
-  "risk_trigger": "specific event that could prove bears right"
+  "confidence": 0.7,
+  "risk_trigger": "specific event that could prove bears right, with timeframe"
 }"""
 
 
@@ -66,7 +76,7 @@ Market context: {market_report.get('summary', 'N/A')}
 Calibrated event data:
 {_format_symbol_events(relevant_events)}
 
-Construct the strongest bear case for {symbol}, directly countering the bull thesis."""
+Construct an aggressive, specific bear case for {symbol}, directly countering the bull thesis with concrete downside risks and price levels where the data supports them."""
 
         result = await llm.generate_json(
             system_prompt=SYSTEM_PROMPT,
