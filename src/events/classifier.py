@@ -1,5 +1,5 @@
 """
-Event classification with Gemini-first inference and SQLite-backed caching.
+Event classification with Groq-first inference and SQLite-backed caching.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "gemini-2.5-flash-event-v1"
+MODEL_VERSION = "groq-llama-3.3-70b-event-v1"
 FALLBACK_MODEL_VERSION = "keyword-event-v1"
 EVENT_TYPES_STR = "\n".join(
     f"  - {event_type.value}"
@@ -87,9 +87,9 @@ class EventClassifier:
                 try:
                     fresh = await self._classify_batch_with_llm(uncached_texts)
                     await self._store_cached(fresh, MODEL_VERSION)
-                    logger.info("Event classification: %s uncached headlines via Gemini", len(fresh))
+                    logger.info("Event classification: %s uncached headlines via Groq", len(fresh))
                 except Exception:
-                    logger.exception("Gemini event classification failed; using keyword fallback")
+                    logger.exception("Groq event classification failed; using keyword fallback")
                     fresh = self._classify_batch_with_keywords(uncached_texts)
                     await self._store_cached(fresh, FALLBACK_MODEL_VERSION)
             else:
@@ -110,11 +110,11 @@ class EventClassifier:
         self,
         headlines: list[str],
     ) -> dict[str, tuple[EventType, float]]:
-        """Classify only uncached unique headlines with Gemini."""
+        """Classify only uncached unique headlines with Groq."""
 
         llm = self._llm
         if llm is None:
-            raise RuntimeError("Gemini client is not configured")
+            raise RuntimeError("Groq client is not configured")
 
         numbered = "\n".join(f"[{index}] {headline}" for index, headline in enumerate(headlines))
         user_prompt = f"Classify these headlines:\n\n{numbered}"
@@ -127,7 +127,7 @@ class EventClassifier:
 
         classifications = _extract_classifications(result)
         if not classifications:
-            raise ValueError("Gemini returned no usable event classifications")
+            raise ValueError("Groq returned no usable event classifications")
         mapped: dict[str, tuple[EventType, float]] = {}
         for index, headline in enumerate(headlines):
             match = next(

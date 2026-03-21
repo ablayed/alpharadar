@@ -95,7 +95,7 @@ class DataAggregator:
         if self.settings.gemini_api_key is None:
             return "No GEMINI_API_KEY set"
         if self._agent_pipeline is not None:
-            return "Ready (Gemini Flash-Lite)"
+            return "Ready (Groq Llama 3.3 70B)"
         if self._agent_pipeline_init_error is not None:
             return "Configured but unavailable"
         return "Initializing"
@@ -454,7 +454,7 @@ class DataAggregator:
             self._agent_pipeline = None
             self._gemini_client = None
             self._agent_pipeline_init_error = f"{type(exc).__name__}: {exc}"
-            logger.exception("Agent pipeline initialization failed; continuing without Gemini")
+            logger.exception("Agent pipeline initialization failed; continuing without Groq")
 
         return self._agent_pipeline
 

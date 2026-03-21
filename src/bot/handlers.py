@@ -184,7 +184,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         analysis = await aggregator.run_agent_analysis(data, forced_symbols=[symbol])
         if analysis is None:
             await msg.edit_text(
-                "\u26A0\uFE0F Agent pipeline unavailable. Check GEMINI_API_KEY or Gemini status."
+                "\u26A0\uFE0F Agent pipeline unavailable. Check GEMINI_API_KEY or Groq status."
             )
             return
 

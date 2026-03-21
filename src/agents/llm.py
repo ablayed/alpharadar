@@ -1,5 +1,5 @@
 """
-Thin async wrapper around the Google Gemini API.
+Thin async wrapper around the Groq chat completions API.
 """
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import logging
 import re
 from typing import Any, ClassVar
 
+import httpx
+
 from aiolimiter import AsyncLimiter
 
 logger = logging.getLogger(__name__)
@@ -16,23 +18,26 @@ logger = logging.getLogger(__name__)
 
 class GeminiClient:
     """
-    Async Gemini client with light rate limiting for the daily agent pipeline.
+    Async Groq client with light rate limiting for the daily agent pipeline.
+
+    The class name stays as GeminiClient to avoid touching the wider import graph.
     """
 
-    MODEL = "gemini-2.5-flash"
-    _limiter: ClassVar[AsyncLimiter] = AsyncLimiter(max_rate=12, time_period=60)
+    MODEL = "llama-3.3-70b-versatile"
+    API_URL = "https://api.groq.com/openai/v1/chat/completions"
+    _limiter: ClassVar[AsyncLimiter] = AsyncLimiter(max_rate=25, time_period=60)
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
-        self._client: Any | None = None
+        self._initialized = False
         self._call_count = 0
 
     async def initialize(self) -> None:
-        """Create the underlying google-genai client."""
-        from google import genai  # type: ignore[import-untyped]
-
-        self._client = genai.Client(api_key=self._api_key)
-        logger.info("Gemini client initialized (model=%s)", self.MODEL)
+        """Validate the configured API key and mark the client ready for use."""
+        if not self._api_key:
+            raise RuntimeError("Groq API key is not configured")
+        self._initialized = True
+        logger.info("Groq client initialized (model=%s)", self.MODEL)
 
     @property
     def call_count(self) -> int:
@@ -47,9 +52,9 @@ class GeminiClient:
         max_tokens: int = 1024,
     ) -> str:
         """
-        Generate a text response from Gemini.
+        Generate a text response from Groq.
         """
-        if self._client is None:
+        if not self._initialized:
             raise RuntimeError("GeminiClient is not initialized")
 
         async with self._limiter:
@@ -71,21 +76,30 @@ class GeminiClient:
         temperature: float,
         max_tokens: int,
     ) -> str:
-        from google.genai import types  # type: ignore[import-untyped]
-
-        if self._client is None:
+        if not self._initialized:
             raise RuntimeError("GeminiClient is not initialized")
 
-        response = self._client.models.generate_content(
-            model=self.MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            ),
+        response = httpx.post(
+            self.API_URL,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=60.0,
         )
-        return response.text or ""
+        response.raise_for_status()
+        data = response.json()
+        message = data["choices"][0]["message"]["content"]
+        return message if isinstance(message, str) else str(message)
 
     async def generate_json(
         self,
@@ -96,7 +110,7 @@ class GeminiClient:
         max_tokens: int = 1024,
     ) -> Any:
         """
-        Ask Gemini for JSON and parse the result conservatively.
+        Ask Groq for JSON and parse the result conservatively.
         """
         text = await self.generate(
             system_prompt=(
@@ -114,11 +128,11 @@ class GeminiClient:
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse Gemini JSON response: %s", text[:200])
+            logger.warning("Failed to parse Groq JSON response: %s", text[:200])
             return {"raw": text}
 
         if isinstance(parsed, dict | list):
             return parsed
 
-        logger.warning("Gemini returned unsupported JSON type: %s", type(parsed).__name__)
+        logger.warning("Groq returned unsupported JSON type: %s", type(parsed).__name__)
         return {"raw": text}
