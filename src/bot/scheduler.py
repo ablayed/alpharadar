@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import Application, ContextTypes
 
+from src.alerts import AlertPipeline
 from src.bot.messages import _send_long_message
 from src.config import settings
 from src.data.aggregator import DataAggregator
@@ -46,6 +47,30 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
         days=tuple(range(7)),
         name="daily_briefing",
         chat_id=chat_id,
+    )
+    job_queue.run_daily(
+        callback=set_stock_reference_prices,
+        time=datetime.time(hour=9, minute=30, second=0, tzinfo=ZoneInfo("America/New_York")),
+        days=(0, 1, 2, 3, 4),
+        name="stock_reference_prices",
+    )
+    job_queue.run_daily(
+        callback=set_crypto_reference_prices,
+        time=datetime.time(hour=0, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
+        days=tuple(range(7)),
+        name="crypto_reference_prices",
+    )
+    job_queue.run_daily(
+        callback=record_prediction_outcomes,
+        time=datetime.time(hour=22, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
+        days=tuple(range(7)),
+        name="record_prediction_outcomes",
+    )
+    job_queue.run_daily(
+        callback=run_weekly_reflection_job,
+        time=datetime.time(hour=8, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
+        days=(6,),
+        name="weekly_reflection",
     )
 
     next_run = getattr(job, "next_t", None) or getattr(job, "next_run_time", None)
@@ -176,3 +201,62 @@ async def send_scheduled_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             logger.exception("Failed to send error message")
         await db.log_briefing(briefing_type, 0, "failed", error=str(exc))
+
+
+async def set_stock_reference_prices(context: ContextTypes.DEFAULT_TYPE) -> None:
+    aggregator = context.bot_data.get("aggregator")
+    pipeline = context.bot_data.get("alert_pipeline")
+    if not isinstance(aggregator, DataAggregator) or not isinstance(pipeline, AlertPipeline):
+        logger.error("Stock reference job dependencies missing in bot_data")
+        return
+
+    try:
+        prices = await aggregator.fetch_stock_prices()
+        for price in prices:
+            pipeline.set_reference_price(price.symbol, price.current_price)
+        logger.info("Set stock reference prices for %d symbols", len(prices))
+    except Exception:
+        logger.exception("Failed to set stock reference prices")
+
+
+async def set_crypto_reference_prices(context: ContextTypes.DEFAULT_TYPE) -> None:
+    aggregator = context.bot_data.get("aggregator")
+    pipeline = context.bot_data.get("alert_pipeline")
+    if not isinstance(aggregator, DataAggregator) or not isinstance(pipeline, AlertPipeline):
+        logger.error("Crypto reference job dependencies missing in bot_data")
+        return
+
+    try:
+        prices = await aggregator.fetch_crypto_prices()
+        for price in prices:
+            pipeline.set_reference_price(price.symbol, price.current_price)
+        logger.info("Set crypto reference prices for %d symbols", len(prices))
+    except Exception:
+        logger.exception("Failed to set crypto reference prices")
+
+
+async def record_prediction_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None:
+    aggregator = context.bot_data.get("aggregator")
+    if not isinstance(aggregator, DataAggregator):
+        logger.error("Outcome tracker dependency missing in bot_data")
+        return
+
+    try:
+        count = await aggregator.record_prediction_outcomes()
+        logger.info("Prediction outcome job completed: %d updates", count)
+    except Exception:
+        logger.exception("Prediction outcome job failed")
+
+
+async def run_weekly_reflection_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    aggregator = context.bot_data.get("aggregator")
+    if not isinstance(aggregator, DataAggregator):
+        logger.error("Weekly reflection dependency missing in bot_data")
+        return
+
+    try:
+        reflection = await aggregator.run_weekly_reflection()
+        if reflection:
+            logger.info("Weekly reflection stored successfully")
+    except Exception:
+        logger.exception("Weekly reflection job failed")

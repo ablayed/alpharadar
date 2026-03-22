@@ -42,6 +42,7 @@ class DebateVerdict:
     key_risk: str
     action_context: str
     selection_reason: str = ""
+    ta_summary: str = ""
 
 
 @dataclass(slots=True)
@@ -69,6 +70,8 @@ class PipelineState(TypedDict, total=False):
     market_is_open: bool
     is_weekend: bool
     forced_symbols: list[str]
+    ta_signals: dict[str, dict[str, object]]
+    reflection_lessons: str
 
     market_report: dict[str, object] | None
     sentiment_report: dict[str, object] | None

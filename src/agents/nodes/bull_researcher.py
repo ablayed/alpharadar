@@ -43,6 +43,7 @@ async def bull_researcher_node(state: Mapping[str, object], llm: Any) -> dict[st
     sentiment_report = _as_mapping(state.get("sentiment_report"))
     technical_report = _as_mapping(state.get("technical_report"))
     event_data = _dict_list(state.get("event_data"))
+    ta_signals = _mapping_dict(state.get("ta_signals"))
 
     arguments: list[dict[str, object]] = []
     call_count = _int_or_zero(state.get("llm_call_count"))
@@ -61,6 +62,7 @@ async def bull_researcher_node(state: Mapping[str, object], llm: Any) -> dict[st
             for event in event_data
             if symbol.upper() in {related.upper() for related in _string_list(event.get("related_symbols"))}
         ]
+        ta_data = _as_mapping(ta_signals.get(symbol.upper()))
 
         user_prompt = f"""Asset: {symbol} ({asset_type})
 Selection reason: {reason}
@@ -74,10 +76,13 @@ Technical analyst says: {technical_report.get('summary', 'N/A')}
 Calibrated event data:
 {_format_symbol_events(relevant_events)}
 
+Technical analysis:
+{_format_ta_data(ta_data)}
+
 Construct an aggressive, specific bull case for {symbol} with concrete upside levels and catalysts where the data supports them."""
 
         result = await llm.generate_json(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=_system_prompt(state),
             user_prompt=user_prompt,
             temperature=0.0,
         )
@@ -98,6 +103,19 @@ def _as_mapping(value: object) -> Mapping[str, object]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _mapping_dict(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {str(key).upper(): item for key, item in value.items()}
+    return {}
+
+
+def _system_prompt(state: Mapping[str, object]) -> str:
+    lessons = str(state.get("reflection_lessons", "")).strip()
+    if not lessons:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}{lessons}"
 
 
 def _fmt_price(value: object) -> str:
@@ -143,6 +161,23 @@ def _format_symbol_events(events: list[dict[str, object]]) -> str:
             f"remaining {remaining_text}"
         )
     return "\n".join(lines)
+
+
+def _format_ta_data(ta_data: Mapping[str, object]) -> str:
+    if not ta_data:
+        return "  None"
+    trend_joiner = ">" if _float_or_zero(ta_data.get("ema_20")) > _float_or_zero(ta_data.get("ema_50")) else "<"
+    squeeze_text = " (SQUEEZE)" if bool(ta_data.get("bb_squeeze")) else ""
+    return "\n".join(
+        [
+            f"  RSI(14): {_float_or_zero(ta_data.get('rsi_value')):.1f} ({ta_data.get('rsi_signal', 'unknown')})",
+            f"  MACD: {ta_data.get('macd_signal', 'unknown')} (histogram: {_float_or_zero(ta_data.get('macd_histogram')):+.3f})",
+            f"  Bollinger: price {ta_data.get('bb_position', 'unknown')}{squeeze_text}",
+            f"  Trend: {ta_data.get('trend', 'unknown')} (EMA20{trend_joiner}EMA50)",
+            f"  ATR: {_float_or_zero(ta_data.get('atr_pct')):.1f}% ({ta_data.get('volatility', 'unknown')} volatility)",
+            f"  Composite signal: {ta_data.get('overall_signal', 'unknown')} ({_float_or_zero(ta_data.get('confidence')):.0%})",
+        ]
+    )
 
 
 def _int_or_zero(value: object) -> int:

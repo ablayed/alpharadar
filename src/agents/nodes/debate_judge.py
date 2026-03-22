@@ -50,6 +50,7 @@ async def debate_judge_node(state: Mapping[str, object], llm: Any) -> dict[str, 
     bull_args = _dict_list(state.get("bull_arguments"))
     bear_args = _dict_list(state.get("bear_arguments"))
     event_data = _dict_list(state.get("event_data"))
+    ta_signals = _mapping_dict(state.get("ta_signals"))
 
     verdicts: list[dict[str, object]] = []
     call_count = _int_or_zero(state.get("llm_call_count"))
@@ -63,6 +64,7 @@ async def debate_judge_node(state: Mapping[str, object], llm: Any) -> dict[str, 
             for event in event_data
             if symbol.upper() in {related.upper() for related in _string_list(event.get("related_symbols"))}
         ]
+        ta_data = _as_mapping(ta_signals.get(symbol.upper()))
 
         user_prompt = f"""Debate for: {symbol}
 
@@ -82,10 +84,13 @@ Risk trigger: {bear.get('risk_trigger', 'N/A')}
 CALIBRATED EVENT EVIDENCE:
 {_format_symbol_events(relevant_events)}
 
+TECHNICAL ANALYSIS:
+{_format_ta_data(ta_data)}
+
 Deliver a decisive verdict for {symbol}. Choose the side with the stronger evidence unless it is truly balanced."""
 
         result = await llm.generate_json(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=_system_prompt(state),
             user_prompt=user_prompt,
             temperature=0.0,
         )
@@ -101,6 +106,25 @@ def _dict_list(value: object) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _as_mapping(value: object) -> Mapping[str, object]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _mapping_dict(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {str(key).upper(): item for key, item in value.items()}
+    return {}
+
+
+def _system_prompt(state: Mapping[str, object]) -> str:
+    lessons = str(state.get("reflection_lessons", "")).strip()
+    if not lessons:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}{lessons}"
 
 
 def _int_or_zero(value: object) -> int:
@@ -143,3 +167,18 @@ def _format_symbol_events(events: list[dict[str, object]]) -> str:
             f"remaining {remaining_text}"
         )
     return "\n".join(lines)
+
+
+def _format_ta_data(ta_data: Mapping[str, object]) -> str:
+    if not ta_data:
+        return "  None"
+    return "\n".join(
+        [
+            f"  RSI(14): {_float_or_zero(ta_data.get('rsi_value')):.1f} ({ta_data.get('rsi_signal', 'unknown')})",
+            f"  MACD: {ta_data.get('macd_signal', 'unknown')} (histogram: {_float_or_zero(ta_data.get('macd_histogram')):+.3f})",
+            f"  Bollinger: {ta_data.get('bb_position', 'unknown')} {'(SQUEEZE)' if bool(ta_data.get('bb_squeeze')) else ''}".rstrip(),
+            f"  Trend: {ta_data.get('trend', 'unknown')}",
+            f"  ATR: {_float_or_zero(ta_data.get('atr_pct')):.1f}% ({ta_data.get('volatility', 'unknown')} volatility)",
+            f"  Composite signal: {ta_data.get('overall_signal', 'unknown')} ({_float_or_zero(ta_data.get('confidence')):.0%})",
+        ]
+    )

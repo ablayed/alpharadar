@@ -47,7 +47,7 @@ async def market_analyst_node(state: Mapping[str, object], llm: Any) -> dict[str
     )
 
     result = await llm.generate_json(
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=_system_prompt(state),
         user_prompt=user_prompt,
         temperature=0.0,
     )
@@ -61,6 +61,13 @@ def _dict_list(value: object) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _system_prompt(state: Mapping[str, object]) -> str:
+    lessons = str(state.get("reflection_lessons", "")).strip()
+    if not lessons:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}{lessons}"
 
 
 def _format_prices(prices: list[dict[str, object]], *, kind: str) -> str:

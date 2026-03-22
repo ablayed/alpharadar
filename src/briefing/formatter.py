@@ -481,6 +481,7 @@ class BriefingFormatter:
         bear = self._sanitize_ai_text(verdict.bear_thesis, None if full_text else 400)
         risk = self._sanitize_ai_text(verdict.key_risk, None if full_text else 300)
         watch = self._sanitize_ai_text(verdict.action_context, None if full_text else 300)
+        ta_summary = self._sanitize_ai_text(verdict.ta_summary, None if full_text else 220)
 
         lines: list[str] = []
         if include_symbol_header:
@@ -495,6 +496,8 @@ class BriefingFormatter:
             lines.extend(["", f"📈 <b>Bulls say:</b> {bull}"])
         if bear:
             lines.append(f"📉 <b>Bears say:</b> {bear}")
+        if ta_summary:
+            lines.append(f"📊 <b>TA:</b> {ta_summary}")
         if risk:
             lines.append(f"⚠️ <b>Key risk:</b> {risk}")
         if watch:

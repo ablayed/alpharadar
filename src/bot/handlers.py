@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from src.alerts import AlertPipeline, AlertSeverity
 from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
 from src.briefing.models import BriefingData
@@ -15,6 +16,7 @@ from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.events.calibration import format_remaining_drift_status
 from src.events.models import DetectedEvent
+from src.reflection.evaluator import AccuracyStats, ReflectionEvaluator
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.storage.database import Database, WatchlistItem
 
@@ -75,6 +77,10 @@ def _help_text() -> str:
         "/analyze NVDA  Run Bull/Bear AI debate for one symbol\n"
         "/playbook  Daily actionable breakdown for all notable assets\n"
         "/events  Show latest detected events\n"
+        "/ta NVDA  Compute local technical analysis for one symbol\n"
+        "/alerts  Show real-time alert pipeline status\n"
+        "/accuracy  Show prediction accuracy and calibration buckets\n"
+        "/reflect  Show the latest weekly self-reflection\n"
         "/status  API usage and system health\n"
         "/help  Show this message"
     )
@@ -185,7 +191,11 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        analysis = await aggregator.run_agent_analysis(data, forced_symbols=[symbol])
+        analysis = await aggregator.run_agent_analysis(
+            data,
+            forced_symbols=[symbol],
+            source="analyze",
+        )
         if analysis is None:
             await msg.edit_text(
                 "\u26A0\uFE0F Agent pipeline unavailable. Check GEMINI_API_KEY or Groq status."
@@ -293,6 +303,146 @@ async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Events command failed")
         escaped_error = html.escape(str(exc), quote=False)
         await msg.edit_text(f"\u26A0\uFE0F Events lookup failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def ta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /ta &lt;symbol&gt;")
+        return
+
+    symbol = context.args[0].strip().upper()
+    if not symbol:
+        await update.message.reply_text("Usage: /ta &lt;symbol&gt;")
+        return
+
+    msg = await update.message.reply_text(f"\U0001F4CA Computing TA for {html.escape(symbol)}...")
+    aggregator = _aggregator_from_context(context)
+
+    try:
+        signal = await aggregator.get_ta_signal(symbol)
+        if signal is None:
+            await msg.edit_text(
+                f"\u26A0\uFE0F Could not fetch enough candle data for {html.escape(symbol)}."
+            )
+            return
+
+        emoji_map = {
+            "strong_buy": "\U0001F7E2\U0001F7E2",
+            "buy": "\U0001F7E2",
+            "neutral": "\u26AA",
+            "sell": "\U0001F534",
+            "strong_sell": "\U0001F534\U0001F534",
+        }
+        text = (
+            f"\U0001F4CA <b>TECHNICAL ANALYSIS: {html.escape(signal.symbol)}</b>\n"
+            f"Price: ${signal.current_price:,.2f}\n\n"
+            f"{emoji_map.get(signal.overall_signal, '\u26AA')} <b>Signal:</b> "
+            f"{html.escape(signal.overall_signal.replace('_', ' ').upper())} "
+            f"({signal.confidence:.0%})\n\n"
+            f"<b>RSI(14):</b> {signal.rsi_value:.1f}  {html.escape(signal.rsi_signal)}\n"
+            f"<b>MACD:</b> {html.escape(signal.macd_signal.replace('_', ' '))} "
+            f"(hist: {signal.macd_histogram:+.3f})\n"
+            f"<b>Bollinger:</b> {html.escape(signal.bb_position.replace('_', ' '))} "
+            f"({'SQUEEZE' if signal.bb_squeeze else 'normal'})\n"
+            f"Upper: ${signal.bb_upper:,.2f} | Lower: ${signal.bb_lower:,.2f}\n"
+            f"<b>ATR(14):</b> ${signal.atr_value:,.2f} ({signal.atr_pct:.1f}%)  "
+            f"{html.escape(signal.volatility)} vol\n"
+            f"<b>Trend:</b> {html.escape(signal.trend.replace('_', ' '))} "
+            f"(EMA20: ${signal.ema_20:,.2f} | EMA50: ${signal.ema_50:,.2f})\n\n"
+            f"<i>{html.escape(signal.summary, quote=False)}</i>"
+        )
+        await msg.edit_text(text)
+    except Exception as exc:
+        logger.exception("TA command failed for %s", symbol)
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F TA failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    pipeline = context.application.bot_data.get("alert_pipeline")
+    if not isinstance(pipeline, AlertPipeline):
+        await update.message.reply_text("Alert pipeline not initialized.")
+        return
+
+    status = pipeline.status()
+    recent_alerts = status.get("recent_alerts", [])
+    recent_lines = [
+        f"- {html.escape(alert.symbol)} {alert.change_pct:+.1f}% ({alert.severity.value})"
+        for alert in recent_alerts
+        if hasattr(alert, "symbol") and hasattr(alert, "change_pct") and hasattr(alert, "severity")
+    ]
+
+    text = (
+        "\U0001F514 <b>ALERT STATUS</b>\n\n"
+        f"Alerts this hour: {status['alerts_this_hour']}/{status['global_limit']}\n"
+        f"Quiet hours: {'Active \U0001F319' if status['quiet_hours'] else 'Off'}\n"
+        f"Assets on cooldown: {status['assets_on_cooldown']}\n\n"
+        f"Stock thresholds: {pipeline.THRESHOLDS['stock'][AlertSeverity.INFO]:.0f}% / "
+        f"{pipeline.THRESHOLDS['stock'][AlertSeverity.WARNING]:.0f}% / "
+        f"{pipeline.THRESHOLDS['stock'][AlertSeverity.CRITICAL]:.0f}%\n"
+        f"Crypto thresholds: {pipeline.THRESHOLDS['crypto'][AlertSeverity.INFO]:.0f}% / "
+        f"{pipeline.THRESHOLDS['crypto'][AlertSeverity.WARNING]:.0f}% / "
+        f"{pipeline.THRESHOLDS['crypto'][AlertSeverity.CRITICAL]:.0f}%"
+    )
+    if recent_lines:
+        text += "\n\n<b>Recent alerts:</b>\n" + "\n".join(recent_lines[:5])
+    await update.message.reply_text(text)
+
+
+async def accuracy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    evaluator = _reflection_evaluator_from_context(context)
+    snapshot = await evaluator.accuracy_snapshot()
+
+    def fmt(stats: AccuracyStats) -> str:
+        if stats.total == 0:
+            return "No data"
+        return f"{stats.correct}/{stats.total} ({stats.accuracy:.1f}%)"
+
+    text = (
+        "\U0001F4CA <b>PREDICTION ACCURACY</b>\n\n"
+        f"<b>All-time:</b> {fmt(snapshot['all_time'])}\n"
+        f"<b>Last 7 days:</b> {fmt(snapshot['last_7d'])}\n\n"
+        f"<b>High confidence (70%+):</b> {fmt(snapshot['high_confidence'])}\n"
+        f"<b>Low confidence (&lt;70%):</b> {fmt(snapshot['low_confidence'])}\n\n"
+        "<i>Predictions logged from briefings, /analyze, and /playbook</i>"
+    )
+    await update.message.reply_text(text)
+
+
+async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    evaluator = _reflection_evaluator_from_context(context)
+    reflection = await evaluator.latest_reflection()
+    if reflection is None:
+        await update.message.reply_text("No reflections yet. First one runs Sunday at 8:00 AM UTC.")
+        return
+
+    text = (
+        "\U0001F9E0 <b>WEEKLY REFLECTION</b>\n"
+        f"Period: {html.escape(reflection.period_start[:10])} to {html.escape(reflection.period_end[:10])}\n"
+        f"Predictions: {reflection.total_predictions} | "
+        f"Accuracy: {(reflection.accuracy_1d or 0.0):.1f}%\n\n"
+        f"{html.escape(reflection.reflection_text, quote=False)}"
+    )
+    await _send_long_message(context.bot, update.effective_chat.id, text)
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -596,6 +746,15 @@ def _sentiment_analyzer_from_context(context: ContextTypes.DEFAULT_TYPE) -> Sent
     aggregator = _aggregator_from_context(context)
     context.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
     return aggregator.sentiment_analyzer
+
+
+def _reflection_evaluator_from_context(context: ContextTypes.DEFAULT_TYPE) -> ReflectionEvaluator:
+    evaluator = context.bot_data.get("reflection_evaluator")
+    if isinstance(evaluator, ReflectionEvaluator):
+        return evaluator
+    aggregator = _aggregator_from_context(context)
+    context.bot_data["reflection_evaluator"] = aggregator.reflection_evaluator
+    return aggregator.reflection_evaluator
 
 
 async def _latest_briefing_data(context: ContextTypes.DEFAULT_TYPE) -> BriefingData:

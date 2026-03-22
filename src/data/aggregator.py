@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
+from dataclasses import asdict
 from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar, cast
 from zoneinfo import ZoneInfo
@@ -25,9 +27,14 @@ from src.data.finnhub_client import FinnhubClient
 from src.data.market_indices import MarketIndicesFetcher
 from src.events.classifier import EventClassifier
 from src.events.models import DetectedEvent
+from src.reflection.evaluator import ReflectionEvaluator
+from src.reflection.reflector import get_latest_lessons, run_weekly_reflection
+from src.reflection.tracker import PredictionTracker
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.sentiment.cache import SentimentCache
 from src.storage.database import Database, WatchlistItem
+from src.ta.candles import fetch_crypto_candles, fetch_stock_candles
+from src.ta.signals import TASignal, compute_signals
 
 if TYPE_CHECKING:
     from src.agents.graph import AgentPipeline
@@ -36,6 +43,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+PRICE_TARGET_RE = re.compile(r"\$([0-9][0-9,]*(?:\.\d+)?)")
 
 PLAYBOOK_SYSTEM_PROMPT = """You are a concise financial analyst creating a daily playbook.
 For each asset provided, write a brief actionable paragraph in this exact format:
@@ -84,6 +92,8 @@ class DataAggregator:
         self.market_indices = MarketIndicesFetcher()
         self.sentiment_analyzer = SentimentAnalyzer()
         self.sentiment_cache = SentimentCache(db=db)
+        self.tracker = PredictionTracker(settings.db_path)
+        self.reflection_evaluator = ReflectionEvaluator(settings.db_path)
         self._gemini_client: GeminiClient | None = None
         self._agent_pipeline: AgentPipeline | None = None
         self._agent_pipeline_init_error: str | None = None
@@ -109,6 +119,84 @@ class DataAggregator:
             self.edgar.close(),
         )
         self.sentiment_analyzer.close()
+
+    async def fetch_stock_prices(self) -> list[AssetPrice]:
+        watchlist = await self.db.get_watchlist("stock")
+        symbols = [item.symbol for item in watchlist]
+        return await self._fetch_stock_prices(symbols)
+
+    async def fetch_crypto_prices(self) -> list[AssetPrice]:
+        watchlist = await self.db.get_watchlist("crypto")
+        crypto_items = [item for item in watchlist if item.coingecko_id]
+        return await self._fetch_crypto_prices(crypto_items)
+
+    async def get_current_price(self, symbol: str, asset_type: str) -> float | None:
+        symbol_upper = symbol.upper()
+        if asset_type == "stock":
+            try:
+                quote = await self.finnhub.get_quote(symbol_upper)
+            except Exception:
+                logger.exception("Failed to fetch current stock price for %s", symbol_upper)
+                return None
+            return quote.current_price if quote.current_price > 0 else None
+
+        if asset_type == "crypto":
+            coin_map = await self._coin_id_map()
+            coin_id = coin_map.get(symbol_upper)
+            if coin_id is None:
+                return None
+            try:
+                prices = await self.coingecko.get_market_data([coin_id])
+            except Exception:
+                logger.exception("Failed to fetch current crypto price for %s", symbol_upper)
+                return None
+            return prices[0].current_price if prices else None
+
+        return None
+
+    async def get_ta_signal(self, symbol: str) -> TASignal | None:
+        symbol_upper = symbol.upper()
+        stock_symbols = {item.symbol.upper() for item in await self.db.get_watchlist("stock")}
+        if symbol_upper in stock_symbols:
+            candles = await fetch_stock_candles(
+                symbol_upper,
+                self.settings.finnhub_api_key.get_secret_value(),
+                db_path=self.settings.db_path,
+            )
+            if candles is None:
+                return None
+            close, high, low, _volume = candles
+            return compute_signals(symbol_upper, close, high, low, timeframe="daily")
+
+        coin_map = await self._coin_id_map()
+        coin_id = coin_map.get(symbol_upper)
+        if coin_id is None:
+            return None
+        candles = await fetch_crypto_candles(coin_id, db_path=self.settings.db_path)
+        if candles is None:
+            return None
+        close, high, low, _volume = candles
+        return compute_signals(symbol_upper, close, high, low, timeframe="daily")
+
+    async def get_ta_signal_payload(self, symbol: str) -> dict[str, object] | None:
+        try:
+            signal = await self.get_ta_signal(symbol)
+        except Exception:
+            logger.exception("TA signal computation failed for %s", symbol.upper())
+            return None
+        if signal is None:
+            return None
+        return cast(dict[str, object], asdict(signal))
+
+    async def record_prediction_outcomes(self) -> int:
+        return await self.tracker.record_outcomes(self.get_current_price)
+
+    async def run_weekly_reflection(self) -> str | None:
+        llm = await self._ensure_llm_client()
+        return await run_weekly_reflection(self.settings.db_path, llm)
+
+    async def get_latest_lessons(self) -> str:
+        return await get_latest_lessons(self.settings.db_path)
 
     def agent_pipeline_status_text(self) -> str:
         if self.settings.gemini_api_key is None:
@@ -441,6 +529,7 @@ class DataAggregator:
         briefing_data: BriefingData,
         *,
         forced_symbols: list[str] | None = None,
+        source: str = "briefing",
     ) -> AgentAnalysis | None:
         pipeline = await self._ensure_agent_pipeline()
         if pipeline is None:
@@ -458,6 +547,7 @@ class DataAggregator:
             analysis.pipeline_duration_seconds,
             len(analysis.debate_verdicts),
         )
+        await self._log_analysis_predictions(analysis, briefing_data, source=source)
         return analysis
 
     async def generate_playbook(self, briefing_data: BriefingData) -> tuple[str, int, float]:
@@ -501,7 +591,9 @@ class DataAggregator:
             max_tokens=max(900, min(2600, 220 * len(notable_assets))),
         )
         duration = round(time.perf_counter() - started_at, 1)
-        return response.strip(), 1, duration
+        playbook_text = response.strip()
+        await self._log_playbook_predictions(playbook_text, notable_assets)
+        return playbook_text, 1, duration
 
     def _notable_assets_for_playbook(self, briefing_data: BriefingData) -> list[dict[str, object]]:
         latest_news_by_symbol: dict[str, NewsItem] = {}
@@ -591,7 +683,11 @@ class DataAggregator:
             gemini = await self._ensure_llm_client()
             if gemini is None:
                 return None
-            self._agent_pipeline = AgentPipeline(gemini_client=gemini)
+            self._agent_pipeline = AgentPipeline(
+                gemini_client=gemini,
+                ta_signal_fetcher=self.get_ta_signal_payload,
+                lessons_provider=self.get_latest_lessons,
+            )
             self._agent_pipeline_init_error = None
         except Exception as exc:
             self._agent_pipeline = None
@@ -614,6 +710,140 @@ class DataAggregator:
         await gemini.initialize()
         self._gemini_client = gemini
         return gemini
+
+    async def _coin_id_map(self) -> dict[str, str]:
+        watchlist = await self.db.get_watchlist("crypto")
+        return {
+            item.symbol.upper(): item.coingecko_id
+            for item in watchlist
+            if item.coingecko_id is not None
+        }
+
+    async def _log_analysis_predictions(
+        self,
+        analysis: AgentAnalysis,
+        briefing_data: BriefingData,
+        *,
+        source: str,
+    ) -> None:
+        price_lookup = {
+            price.symbol.upper(): price
+            for price in [*briefing_data.stock_prices, *briefing_data.crypto_prices]
+        }
+        strongest_event_by_symbol: dict[str, str | None] = {}
+        for event in briefing_data.event_data:
+            for symbol in event.related_symbols:
+                current_event = strongest_event_by_symbol.get(symbol.upper())
+                if current_event is None or event.confidence >= 0.6:
+                    strongest_event_by_symbol[symbol.upper()] = event.event_type.value
+
+        for verdict in analysis.debate_verdicts:
+            symbol_upper = verdict.symbol.upper()
+            price = price_lookup.get(symbol_upper)
+            if price is None or price.current_price <= 0:
+                continue
+            predicted_direction = self._direction_from_view(verdict.prevailing_view)
+            await self.tracker.log_prediction(
+                symbol=symbol_upper,
+                asset_type=price.asset_type.value,
+                predicted_direction=predicted_direction,
+                confidence=verdict.confidence,
+                price_at_prediction=price.current_price,
+                source=source,
+                reasoning=verdict.summary,
+                event_type=strongest_event_by_symbol.get(symbol_upper),
+                predicted_target=self._extract_price_target(
+                    verdict.summary,
+                    verdict.bull_thesis,
+                    verdict.bear_thesis,
+                    verdict.action_context,
+                ),
+            )
+
+    async def _log_playbook_predictions(
+        self,
+        playbook_text: str,
+        notable_assets: list[dict[str, object]],
+    ) -> None:
+        if not playbook_text.strip():
+            return
+
+        asset_lookup = {
+            str(asset["symbol"]).upper(): asset
+            for asset in notable_assets
+            if isinstance(asset.get("symbol"), str)
+        }
+
+        for block in self._split_playbook_sections(playbook_text):
+            first_line = block.splitlines()[0] if block.splitlines() else ""
+            symbol = first_line.split(" ", 1)[0].strip().upper()
+            asset = asset_lookup.get(symbol)
+            if asset is None:
+                continue
+            current_price = float(asset.get("current_price", 0.0) or 0.0)
+            if current_price <= 0:
+                continue
+            direction, confidence = self._infer_playbook_prediction(block)
+            await self.tracker.log_prediction(
+                symbol=symbol,
+                asset_type=str(asset.get("asset_type", "unknown")),
+                predicted_direction=direction,
+                confidence=confidence,
+                price_at_prediction=current_price,
+                source="playbook",
+                reasoning=block,
+                event_type=str(asset.get("event_type", "")) or None,
+                predicted_target=self._extract_price_target(block),
+            )
+
+    @staticmethod
+    def _direction_from_view(view: str) -> str:
+        if view in {"bullish", "bearish", "neutral"}:
+            return view
+        return "neutral"
+
+    @staticmethod
+    def _extract_price_target(*texts: str) -> float | None:
+        for text in texts:
+            for match in PRICE_TARGET_RE.findall(text):
+                try:
+                    return float(match.replace(",", ""))
+                except ValueError:
+                    continue
+        return None
+
+    @staticmethod
+    def _split_playbook_sections(playbook_text: str) -> list[str]:
+        return [section.strip() for section in playbook_text.split("\n\n") if section.strip()]
+
+    @staticmethod
+    def _infer_playbook_prediction(block: str) -> tuple[str, float]:
+        normalized = block.lower()
+        bullish_terms = (
+            "upside",
+            "break above",
+            "higher",
+            "rally",
+            "gains",
+            "bounce",
+            "surge",
+        )
+        bearish_terms = (
+            "downside",
+            "break below",
+            "lower",
+            "selloff",
+            "losses",
+            "drop",
+            "fade",
+        )
+        bullish_hits = sum(term in normalized for term in bullish_terms)
+        bearish_hits = sum(term in normalized for term in bearish_terms)
+        if bullish_hits > bearish_hits:
+            return "bullish", 0.55
+        if bearish_hits > bullish_hits:
+            return "bearish", 0.55
+        return "neutral", 0.5
 
     @staticmethod
     def _result_or_default(

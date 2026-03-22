@@ -100,6 +100,48 @@ CREATE TABLE IF NOT EXISTS event_cache (
     classified_at TEXT NOT NULL DEFAULT (datetime('now')),
     model_version TEXT NOT NULL DEFAULT 'gemini-2.5-flash-event-v1'
 );
+
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    symbol TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    event_type TEXT,
+    predicted_direction TEXT NOT NULL,
+    predicted_target REAL,
+    confidence REAL NOT NULL,
+    reasoning TEXT,
+    source TEXT NOT NULL,
+    price_at_prediction REAL NOT NULL,
+    outcome_recorded INTEGER NOT NULL DEFAULT 0,
+    actual_price_1d REAL,
+    actual_price_5d REAL,
+    actual_direction TEXT,
+    actual_change_1d_pct REAL,
+    actual_change_5d_pct REAL,
+    is_correct_1d INTEGER,
+    is_correct_5d INTEGER,
+    outcome_recorded_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS reflections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    reflection_type TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    total_predictions INTEGER,
+    accuracy_1d REAL,
+    accuracy_5d REAL,
+    avg_confidence REAL,
+    calibration_error REAL,
+    reflection_text TEXT NOT NULL,
+    lessons_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_predictions_symbol ON predictions(symbol);
+CREATE INDEX IF NOT EXISTS idx_predictions_created ON predictions(created_at);
+CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome_recorded);
 """
 
 

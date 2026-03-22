@@ -3,9 +3,10 @@ LangGraph definition for the AlphaRadar multi-agent analysis pipeline.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict
 from typing import Any
 
@@ -24,12 +25,23 @@ from src.events.models import DetectedEvent, EventType
 
 logger = logging.getLogger(__name__)
 
+TASignalFetcher = Callable[[str], Awaitable[dict[str, object] | None]]
+LessonsProvider = Callable[[], Awaitable[str]]
+
 
 class AgentPipeline:
     """Orchestrates the LangGraph multi-agent financial analysis flow."""
 
-    def __init__(self, gemini_client: GeminiClient) -> None:
+    def __init__(
+        self,
+        gemini_client: GeminiClient,
+        *,
+        ta_signal_fetcher: TASignalFetcher | None = None,
+        lessons_provider: LessonsProvider | None = None,
+    ) -> None:
         self._llm = gemini_client
+        self._ta_signal_fetcher = ta_signal_fetcher
+        self._lessons_provider = lessons_provider
         self._graph = self._build_graph()
 
     def _build_graph(self) -> Any:
@@ -47,6 +59,9 @@ class AgentPipeline:
         async def mover_node(state: PipelineState) -> dict[str, object]:
             return await mover_selector_node(state)
 
+        async def ta_node(state: PipelineState) -> dict[str, object]:
+            return await self._build_ta_context(state)
+
         async def bull_node(state: PipelineState) -> dict[str, object]:
             return await bull_researcher_node(state, llm)
 
@@ -61,6 +76,7 @@ class AgentPipeline:
         graph.add_node("sentiment_analyst", sentiment_node)
         graph.add_node("technical_analyst", technical_node)
         graph.add_node("mover_selector", mover_node)
+        graph.add_node("ta_context", ta_node)
         graph.add_node("bull_researcher", bull_node)
         graph.add_node("bear_researcher", bear_node)
         graph.add_node("debate_judge", judge_node)
@@ -69,7 +85,8 @@ class AgentPipeline:
         graph.add_edge("market_analyst", "sentiment_analyst")
         graph.add_edge("sentiment_analyst", "technical_analyst")
         graph.add_edge("technical_analyst", "mover_selector")
-        graph.add_edge("mover_selector", "bull_researcher")
+        graph.add_edge("mover_selector", "ta_context")
+        graph.add_edge("ta_context", "bull_researcher")
         graph.add_edge("bull_researcher", "bear_researcher")
         graph.add_edge("bear_researcher", "debate_judge")
         graph.add_edge("debate_judge", END)
@@ -85,6 +102,8 @@ class AgentPipeline:
         started_at = time.perf_counter()
         initial_state = self._serialize_briefing_data(briefing_data)
         initial_state["forced_symbols"] = [symbol.upper() for symbol in forced_symbols or []]
+        initial_state["ta_signals"] = {}
+        initial_state["reflection_lessons"] = await self._load_reflection_lessons()
         initial_state["llm_call_count"] = 0
         initial_state["errors"] = []
         initial_state["selected_movers"] = []
@@ -124,9 +143,15 @@ class AgentPipeline:
             str(item.get("symbol", "")).upper(): item
             for item in _coerce_dict_list(final_state.get("selected_movers"))
         }
+        ta_signals = {
+            str(symbol).upper(): payload
+            for symbol, payload in _coerce_mapping(final_state.get("ta_signals")).items()
+            if isinstance(payload, dict)
+        }
         for verdict in _coerce_dict_list(final_state.get("debate_verdicts")):
             symbol = _coerce_text(verdict.get("symbol")) or "?"
             selected = selected_by_symbol.get(symbol.upper(), {})
+            ta_signal = ta_signals.get(symbol.upper(), {})
             analysis.debate_verdicts.append(
                 DebateVerdict(
                     symbol=symbol,
@@ -139,10 +164,48 @@ class AgentPipeline:
                     key_risk=_coerce_text(verdict.get("key_risk")),
                     action_context=_coerce_text(verdict.get("what_to_watch")),
                     selection_reason=_coerce_text(selected.get("reason")),
+                    ta_summary=_coerce_text(ta_signal.get("summary")),
                 )
             )
 
         return analysis
+
+    async def _build_ta_context(self, state: Mapping[str, object]) -> dict[str, object]:
+        if self._ta_signal_fetcher is None:
+            return {"ta_signals": {}}
+
+        movers = _coerce_dict_list(state.get("selected_movers"))
+        symbols = list(
+            dict.fromkeys(
+                str(mover.get("symbol", "")).upper()
+                for mover in movers
+                if str(mover.get("symbol", "")).strip()
+            )
+        )
+        if not symbols:
+            return {"ta_signals": {}}
+
+        results = await asyncio.gather(
+            *(self._ta_signal_fetcher(symbol) for symbol in symbols),
+            return_exceptions=True,
+        )
+        ta_signals: dict[str, dict[str, object]] = {}
+        for symbol, result in zip(symbols, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("TA context failed for %s: %s", symbol, result)
+                continue
+            if isinstance(result, dict):
+                ta_signals[symbol] = result
+        return {"ta_signals": ta_signals}
+
+    async def _load_reflection_lessons(self) -> str:
+        if self._lessons_provider is None:
+            return ""
+        try:
+            return await self._lessons_provider()
+        except Exception:
+            logger.exception("Failed to load reflection lessons for agent prompts")
+            return ""
 
     def _serialize_briefing_data(self, data: object) -> PipelineState:
         """Convert BriefingData into plain dictionaries for graph execution."""
@@ -200,6 +263,12 @@ def _coerce_dict_list(value: object) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _coerce_mapping(value: object) -> Mapping[object, object]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
 
 
 def _coerce_string_list(value: object) -> list[str]:
