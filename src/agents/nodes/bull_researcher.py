@@ -44,6 +44,10 @@ async def bull_researcher_node(state: Mapping[str, object], llm: Any) -> dict[st
     technical_report = _as_mapping(state.get("technical_report"))
     event_data = _dict_list(state.get("event_data"))
     ta_signals = _mapping_dict(state.get("ta_signals"))
+    correlation_pairs = _mapping_dict(state.get("correlation_pairs"))
+    composite_scores = _mapping_dict(state.get("composite_scores"))
+    regime_state = _as_mapping(state.get("regime_state"))
+    lead_lag_pairs = _mapping_dict(state.get("lead_lag_pairs"))
 
     arguments: list[dict[str, object]] = []
     call_count = _int_or_zero(state.get("llm_call_count"))
@@ -63,6 +67,9 @@ async def bull_researcher_node(state: Mapping[str, object], llm: Any) -> dict[st
             if symbol.upper() in {related.upper() for related in _string_list(event.get("related_symbols"))}
         ]
         ta_data = _as_mapping(ta_signals.get(symbol.upper()))
+        corr_data = _as_mapping(correlation_pairs.get(symbol.upper()))
+        composite_data = _as_mapping(composite_scores.get(symbol.upper()))
+        lead_lag = _as_mapping(_lead_lag_for_symbol(symbol, lead_lag_pairs))
 
         user_prompt = f"""Asset: {symbol} ({asset_type})
 Selection reason: {reason}
@@ -78,6 +85,13 @@ Calibrated event data:
 
 Technical analysis:
 {_format_ta_data(ta_data)}
+
+{_format_context_block(
+    regime_state=regime_state,
+    corr_data=corr_data,
+    composite_data=composite_data,
+    lead_lag=lead_lag,
+)}
 
 Construct an aggressive, specific bull case for {symbol} with concrete upside levels and catalysts where the data supports them."""
 
@@ -178,6 +192,44 @@ def _format_ta_data(ta_data: Mapping[str, object]) -> str:
             f"  Composite signal: {ta_data.get('overall_signal', 'unknown')} ({_float_or_zero(ta_data.get('confidence')):.0%})",
         ]
     )
+
+
+def _format_context_block(
+    *,
+    regime_state: Mapping[str, object],
+    corr_data: Mapping[str, object],
+    composite_data: Mapping[str, object],
+    lead_lag: Mapping[str, object],
+) -> str:
+    return "\n".join(
+        [
+            "--- Market Regime ---",
+            f"Regime: {regime_state.get('regime', 'N/A')}",
+            f"Description: {regime_state.get('description', 'N/A')}",
+            "",
+            "--- Correlation ---",
+            f"Regime signal: {corr_data.get('regime_signal', 'N/A')}",
+            f"20d/60d/90d: {_float_or_zero(corr_data.get('corr_20d')):.2f} / {_float_or_zero(corr_data.get('corr_60d')):.2f} / {_float_or_zero(corr_data.get('corr_90d')):.2f}",
+            f"Divergence: {_float_or_zero(corr_data.get('divergence')):+.2f} | z-score: {_float_or_zero(corr_data.get('z_score')):+.2f}",
+            "",
+            "--- Lead-Lag ---",
+            f"{lead_lag.get('interpretation', 'N/A')}",
+            "",
+            "--- Composite Signal ---",
+            f"Score: {_float_or_zero(composite_data.get('score')):+.2f} ({composite_data.get('direction', 'N/A')})",
+            f"Agreement: {_float_or_zero(composite_data.get('agreement')):.0%}",
+            f"Summary: {composite_data.get('summary', 'N/A')}",
+        ]
+    )
+
+
+def _lead_lag_for_symbol(symbol: str, lead_lag_pairs: Mapping[str, object]) -> object | None:
+    symbol_upper = symbol.upper()
+    for key, value in lead_lag_pairs.items():
+        key_upper = str(key).upper()
+        if symbol_upper in key_upper.split(":"):
+            return value
+    return None
 
 
 def _int_or_zero(value: object) -> int:

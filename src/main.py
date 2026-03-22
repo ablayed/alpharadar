@@ -25,12 +25,15 @@ from src.bot.handlers import (
     analyze_command,
     alerts_command,
     briefing_command,
+    corr_command,
     events_command,
     handle_asset_type_callback,
     help_command,
     playbook_command,
+    regime_command,
     reflect_command,
     remove_command,
+    signals_command,
     sentiment_command,
     start_command,
     status_command,
@@ -78,6 +81,8 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     application.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
     application.bot_data["tracker"] = aggregator.tracker
     application.bot_data["reflection_evaluator"] = aggregator.reflection_evaluator
+    application.bot_data["correlation_engine"] = aggregator.correlation_engine
+    application.bot_data["current_regime"] = aggregator.current_regime
     application.bot_data["settings"] = settings
     application.bot_data["started_at"] = datetime.now(ZoneInfo(settings.timezone))
     application.bot_data["alert_pipeline"] = AlertPipeline()
@@ -205,6 +210,9 @@ def main() -> None:
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("playbook", playbook_command))
     application.add_handler(CommandHandler("events", events_command))
+    application.add_handler(CommandHandler("corr", corr_command))
+    application.add_handler(CommandHandler("regime", regime_command))
+    application.add_handler(CommandHandler("signals", signals_command))
     application.add_handler(CommandHandler("ta", ta_command))
     application.add_handler(CommandHandler("alerts", alerts_command))
     application.add_handler(CommandHandler("accuracy", accuracy_command))

@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import Application, ContextTypes
 
-from src.alerts import AlertPipeline
+from src.alerts import AlertPipeline, AlertSeverity
 from src.bot.messages import _send_long_message
 from src.config import settings
 from src.data.aggregator import DataAggregator
@@ -71,6 +71,18 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
         time=datetime.time(hour=8, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
         days=(6,),
         name="weekly_reflection",
+    )
+    job_queue.run_daily(
+        callback=update_correlation_engine_job,
+        time=datetime.time(hour=23, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
+        days=tuple(range(7)),
+        name="update_correlation_engine",
+    )
+    job_queue.run_daily(
+        callback=detect_and_store_regime_job,
+        time=datetime.time(hour=23, minute=5, second=0, tzinfo=ZoneInfo("UTC")),
+        days=tuple(range(7)),
+        name="detect_and_store_regime",
     )
 
     next_run = getattr(job, "next_t", None) or getattr(job, "next_run_time", None)
@@ -154,6 +166,9 @@ async def send_scheduled_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         data = await aggregator.gather_briefing_data()
         context.bot_data["latest_briefing_data"] = data
+        context.bot_data["current_regime"] = data.regime_state
+        context.bot_data["composite_scores"] = data.composite_scores
+        context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
         if data.is_weekend:
             briefing_type = "weekend"
             message = formatter.format_weekend(data)
@@ -260,3 +275,67 @@ async def run_weekly_reflection_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info("Weekly reflection stored successfully")
     except Exception:
         logger.exception("Weekly reflection job failed")
+
+
+async def update_correlation_engine_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    aggregator = context.bot_data.get("aggregator")
+    pipeline = context.bot_data.get("alert_pipeline")
+    if not isinstance(aggregator, DataAggregator):
+        logger.error("Correlation engine dependency missing in bot_data")
+        return
+
+    try:
+        snapshots = await aggregator.update_correlation_engine(persist=True)
+        context.bot_data["correlation_engine"] = aggregator.correlation_engine
+        logger.info("Correlation engine updated for %d window(s)", len(snapshots))
+        if isinstance(pipeline, AlertPipeline):
+            await _send_correlation_anomaly_alerts(context, aggregator, pipeline)
+    except Exception:
+        logger.exception("Correlation engine update failed")
+
+
+async def detect_and_store_regime_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    aggregator = context.bot_data.get("aggregator")
+    if not isinstance(aggregator, DataAggregator):
+        logger.error("Regime detection dependency missing in bot_data")
+        return
+
+    try:
+        regime_state = await aggregator.refresh_regime_state(persist=True)
+        context.bot_data["current_regime"] = regime_state
+        if regime_state is not None:
+            logger.info("Stored market regime: %s (%.0f%%)", regime_state.regime.value, regime_state.confidence * 100)
+    except Exception:
+        logger.exception("Regime detection job failed")
+
+
+async def _send_correlation_anomaly_alerts(
+    context: ContextTypes.DEFAULT_TYPE,
+    aggregator: DataAggregator,
+    pipeline: AlertPipeline,
+) -> None:
+    chat_id = int(settings.telegram_chat_id)
+    anomalies = [pair for pair in aggregator.correlation_engine.get_top_movers(5) if abs(pair.z_score) >= 2.0]
+    for pair in anomalies[:2]:
+        severity = AlertSeverity.CRITICAL if abs(pair.z_score) >= 3.0 else AlertSeverity.WARNING
+        message = (
+            f"🔗 <b>CORRELATION ALERT</b> [{severity.value.upper()}]\n\n"
+            f"{pair.symbol_a}-{pair.symbol_b} shifted to {pair.corr_20d:+.2f} (20d) vs {pair.corr_90d:+.2f} (90d)\n"
+            f"Δ={pair.divergence:+.2f} | z={pair.z_score:+.1f} | {pair.regime_signal}"
+        )
+        alert = pipeline.build_manual_alert(
+            symbol=f"{pair.symbol_a}-{pair.symbol_b}",
+            asset_type="correlation",
+            severity=severity,
+            message=message,
+            signed_change=pair.divergence,
+            current_value=pair.corr_20d,
+            reference_value=pair.corr_90d,
+        )
+        if alert is None:
+            continue
+        pipeline.record_sent(alert)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
+        except Exception:
+            logger.exception("Failed to send correlation anomaly alert for %s-%s", pair.symbol_a, pair.symbol_b)

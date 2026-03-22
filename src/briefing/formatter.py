@@ -297,6 +297,9 @@ class BriefingFormatter:
             f"{self._format_header_date(data.generated_at)}  {self._format_market_state(data.market_is_open)}",
             self._format_market_snapshot(data),
         ]
+        regime_section = self._format_market_regime(data)
+        if regime_section:
+            sections.append(regime_section)
 
         if weekend:
             sections.extend(
@@ -374,6 +377,26 @@ class BriefingFormatter:
         if context:
             lines.append(f"<i>{self._escape(context)}</i>")
 
+        return "\n".join(lines)
+
+    def _format_market_regime(self, data: BriefingData) -> str:
+        regime_state = data.regime_state
+        if regime_state is None or regime_state.regime.value == "unknown":
+            return ""
+
+        lines = [
+            "ðŸ”— <b>MARKET REGIME</b>",
+            f"{self._regime_emoji(regime_state.regime.value)} {self._escape(regime_state.regime.value.replace('_', ' ').upper())} ({regime_state.confidence:.0%} confidence)",
+        ]
+        if regime_state.btc_qqq_corr is not None:
+            line = f"BTC-QQQ corr: {regime_state.btc_qqq_corr:+.2f}"
+            if regime_state.divergence_speed is not None:
+                line += f" | Divergence: {regime_state.divergence_speed:+.2f}"
+            lines.append(line)
+        lines.append(f"VIX: {self._escape(regime_state.vix_level)}")
+        lines.append(self._escape(regime_state.description))
+        lines.append(f"Stocks: {self._escape(regime_state.implication_stocks)}")
+        lines.append(f"Crypto: {self._escape(regime_state.implication_crypto)}")
         return "\n".join(lines)
 
     def _format_stocks_section(
@@ -482,6 +505,8 @@ class BriefingFormatter:
         risk = self._sanitize_ai_text(verdict.key_risk, None if full_text else 300)
         watch = self._sanitize_ai_text(verdict.action_context, None if full_text else 300)
         ta_summary = self._sanitize_ai_text(verdict.ta_summary, None if full_text else 220)
+        composite_summary = self._sanitize_ai_text(verdict.composite_summary, None if full_text else 240)
+        regime_context = self._sanitize_ai_text(verdict.regime_context, None if full_text else 180)
 
         lines: list[str] = []
         if include_symbol_header:
@@ -498,6 +523,10 @@ class BriefingFormatter:
             lines.append(f"📉 <b>Bears say:</b> {bear}")
         if ta_summary:
             lines.append(f"📊 <b>TA:</b> {ta_summary}")
+        if composite_summary:
+            lines.append(f"🧭 <b>Composite:</b> {composite_summary}")
+        if regime_context:
+            lines.append(f"🔗 <b>Regime:</b> {regime_context}")
         if risk:
             lines.append(f"⚠️ <b>Key risk:</b> {risk}")
         if watch:
@@ -719,6 +748,7 @@ class BriefingFormatter:
             "market_status": "Market status temporarily unavailable",
             "news": "News feed temporarily unavailable",
             "coingecko_budget": "CoinGecko usage temporarily unavailable",
+            "signal_context": "Correlation or composite signal context temporarily unavailable",
         }
         return [mapping[section] for section in failed_sections if section in mapping]
 
@@ -786,3 +816,13 @@ class BriefingFormatter:
         if len(value) <= limit:
             return value
         return f"{value[: max(0, limit - 3)]}..."
+
+    @staticmethod
+    def _regime_emoji(regime: str) -> str:
+        mapping = {
+            "risk_on": "🟢",
+            "risk_off": "🔴",
+            "divergent": "🔄",
+            "volatile": "🟡",
+        }
+        return mapping.get(regime, "⚪")

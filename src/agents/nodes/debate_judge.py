@@ -51,6 +51,9 @@ async def debate_judge_node(state: Mapping[str, object], llm: Any) -> dict[str, 
     bear_args = _dict_list(state.get("bear_arguments"))
     event_data = _dict_list(state.get("event_data"))
     ta_signals = _mapping_dict(state.get("ta_signals"))
+    correlation_pairs = _mapping_dict(state.get("correlation_pairs"))
+    composite_scores = _mapping_dict(state.get("composite_scores"))
+    regime_state = _as_mapping(state.get("regime_state"))
 
     verdicts: list[dict[str, object]] = []
     call_count = _int_or_zero(state.get("llm_call_count"))
@@ -65,6 +68,8 @@ async def debate_judge_node(state: Mapping[str, object], llm: Any) -> dict[str, 
             if symbol.upper() in {related.upper() for related in _string_list(event.get("related_symbols"))}
         ]
         ta_data = _as_mapping(ta_signals.get(symbol.upper()))
+        corr_data = _as_mapping(correlation_pairs.get(symbol.upper()))
+        composite_data = _as_mapping(composite_scores.get(symbol.upper()))
 
         user_prompt = f"""Debate for: {symbol}
 
@@ -86,6 +91,21 @@ CALIBRATED EVENT EVIDENCE:
 
 TECHNICAL ANALYSIS:
 {_format_ta_data(ta_data)}
+
+MARKET REGIME:
+Regime: {regime_state.get('regime', 'N/A')}
+Description: {regime_state.get('description', 'N/A')}
+
+CORRELATION:
+Regime signal: {corr_data.get('regime_signal', 'N/A')}
+20d/60d/90d: {_float_or_zero(corr_data.get('corr_20d')):.2f} / {_float_or_zero(corr_data.get('corr_60d')):.2f} / {_float_or_zero(corr_data.get('corr_90d')):.2f}
+z-score: {_float_or_zero(corr_data.get('z_score')):+.2f}
+
+COMPOSITE SIGNAL:
+Score: {_float_or_zero(composite_data.get('score')):+.2f}
+Direction: {composite_data.get('direction', 'N/A')}
+Agreement: {_float_or_zero(composite_data.get('agreement')):.0%}
+Summary: {composite_data.get('summary', 'N/A')}
 
 Deliver a decisive verdict for {symbol}. Choose the side with the stronger evidence unless it is truly balanced."""
 

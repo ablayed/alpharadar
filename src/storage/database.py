@@ -8,6 +8,8 @@ from typing import Literal, cast
 
 import aiosqlite
 
+from src.correlation.models import MarketRegime, RegimeState
+
 AssetTypeLiteral = Literal["stock", "crypto"]
 
 DEFAULT_STOCKS: list[tuple[str, str, str, None]] = [
@@ -137,6 +139,29 @@ CREATE TABLE IF NOT EXISTS reflections (
     calibration_error REAL,
     reflection_text TEXT NOT NULL,
     lessons_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS correlation_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    window_size INTEGER NOT NULL,
+    pair_a TEXT NOT NULL,
+    pair_b TEXT NOT NULL,
+    correlation REAL NOT NULL,
+    z_score REAL,
+    regime TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_corr_pair ON correlation_history(pair_a, pair_b, recorded_at);
+
+CREATE TABLE IF NOT EXISTS regime_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    regime TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    description TEXT,
+    btc_qqq_corr REAL,
+    vix_level TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_predictions_symbol ON predictions(symbol);
@@ -356,3 +381,74 @@ class Database:
             cursor = await conn.execute("SELECT COUNT(*) FROM event_cache")
             row = await cursor.fetchone()
             return int(row[0]) if row else 0
+
+    async def store_correlation_rows(
+        self,
+        rows: list[tuple[int, str, str, float, float | None, str | None]],
+    ) -> None:
+        if not rows:
+            return
+        async with self._write_lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                await self._configure_connection(conn)
+                await conn.executemany(
+                    """
+                    INSERT INTO correlation_history
+                    (window_size, pair_a, pair_b, correlation, z_score, regime)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                await conn.commit()
+
+    async def store_regime_state(self, regime_state: RegimeState) -> None:
+        async with self._write_lock:
+            async with aiosqlite.connect(self.db_path) as conn:
+                await self._configure_connection(conn)
+                await conn.execute(
+                    """
+                    INSERT INTO regime_history
+                    (regime, confidence, description, btc_qqq_corr, vix_level)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        regime_state.regime.value,
+                        regime_state.confidence,
+                        regime_state.description,
+                        regime_state.btc_qqq_corr,
+                        regime_state.vix_level,
+                    ),
+                )
+                await conn.commit()
+
+    async def latest_regime_state(self) -> RegimeState | None:
+        async with aiosqlite.connect(self.db_path) as conn:
+            await self._configure_connection(conn)
+            cursor = await conn.execute(
+                """
+                SELECT regime, confidence, description, btc_qqq_corr, vix_level
+                FROM regime_history
+                ORDER BY recorded_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        regime_value = str(row[0])
+        try:
+            regime = MarketRegime(regime_value)
+        except ValueError:
+            regime = MarketRegime.UNKNOWN
+
+        return RegimeState(
+            regime=regime,
+            confidence=float(row[1]),
+            description=str(row[2] or ""),
+            btc_qqq_corr=(float(row[3]) if row[3] is not None else None),
+            vix_level=str(row[4] or "low"),
+            divergence_speed=None,
+            implication_stocks="",
+            implication_crypto="",
+        )

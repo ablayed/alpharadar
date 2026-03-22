@@ -125,6 +125,43 @@ class AlertPipeline:
         self._recent_alerts.appendleft(alert)
         self._prune(alert.timestamp)
 
+    def build_manual_alert(
+        self,
+        *,
+        symbol: str,
+        asset_type: str,
+        severity: AlertSeverity,
+        message: str,
+        signed_change: float,
+        current_value: float = 0.0,
+        reference_value: float = 0.0,
+    ) -> Alert | None:
+        symbol_upper = symbol.upper()
+        now = self._time_func()
+        self._prune(now)
+
+        if not self._passes_cooldown(symbol_upper, severity, now):
+            return None
+        if not self._passes_global_limit(severity):
+            return None
+        if severity is not AlertSeverity.CRITICAL and self._is_quiet_hours():
+            return None
+        direction = "up" if signed_change >= 0 else "down"
+        if self._is_duplicate(symbol_upper, signed_change, severity, now):
+            return None
+
+        del direction
+        return Alert(
+            symbol=symbol_upper,
+            asset_type=asset_type,
+            severity=severity,
+            current_price=float(current_value),
+            change_pct=float(signed_change),
+            reference_price=float(reference_value),
+            message=message,
+            timestamp=now,
+        )
+
     def recent_alert_count(self) -> int:
         now = self._time_func()
         self._prune(now)

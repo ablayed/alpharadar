@@ -12,6 +12,7 @@ from src.alerts import AlertPipeline, AlertSeverity
 from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
 from src.briefing.models import BriefingData
+from src.correlation import compute_lead_lag
 from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.events.calibration import format_remaining_drift_status
@@ -77,6 +78,9 @@ def _help_text() -> str:
         "/analyze NVDA  Run Bull/Bear AI debate for one symbol\n"
         "/playbook  Daily actionable breakdown for all notable assets\n"
         "/events  Show latest detected events\n"
+        "/corr  Show cross-asset correlation shifts\n"
+        "/regime  Show the current market regime\n"
+        "/signals NVDA  Show the full signal stack for one symbol\n"
         "/ta NVDA  Compute local technical analysis for one symbol\n"
         "/alerts  Show real-time alert pipeline status\n"
         "/accuracy  Show prediction accuracy and calibration buckets\n"
@@ -303,6 +307,142 @@ async def events_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Events command failed")
         escaped_error = html.escape(str(exc), quote=False)
         await msg.edit_text(f"\u26A0\uFE0F Events lookup failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def corr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    msg = await update.message.reply_text("\U0001F4CA Computing correlations...")
+    aggregator = _aggregator_from_context(context)
+
+    try:
+        if not aggregator.correlation_engine.compute_all_windows():
+            await aggregator.update_correlation_engine(persist=False)
+
+        key_pairs = [
+            ("BTC", "QQQ"),
+            ("BTC", "ETH"),
+            ("ETH", "SOL"),
+            ("BTC", "SPY"),
+            ("NVDA", "AMD"),
+            ("NVDA", "BTC"),
+        ]
+        lines = ["\U0001F517 <b>CROSS-ASSET CORRELATIONS</b>", ""]
+        for sym_a, sym_b in key_pairs:
+            pair = aggregator.correlation_engine.get_pair_analysis(sym_a, sym_b)
+            if pair is None:
+                continue
+            emoji = "\U0001F7E2" if pair.corr_20d > 0.5 else ("\U0001F534" if pair.corr_20d < -0.2 else "\u26AA")
+            lines.append(
+                f"{emoji} <b>{sym_a}-{sym_b}</b>: "
+                f"20d={pair.corr_20d:+.2f} | 60d={pair.corr_60d:+.2f} | 90d={pair.corr_90d:+.2f}"
+            )
+            lines.append(
+                f"   \u0394={pair.divergence:+.2f} | z={pair.z_score:+.1f} | {html.escape(pair.regime_signal)}"
+            )
+
+        movers = aggregator.correlation_engine.get_top_movers(3)
+        if movers:
+            lines.extend(["", "\U0001F4C8 <b>BIGGEST CORRELATION SHIFTS</b>"])
+            for mover in movers:
+                lines.append(
+                    f"{mover.symbol_a}-{mover.symbol_b}: \u0394={mover.divergence:+.2f} ({mover.regime_signal})"
+                )
+
+        lead_lag_pairs = context.bot_data.get("lead_lag_pairs")
+        lead_lag_text: str | None = None
+        if isinstance(lead_lag_pairs, dict):
+            qqq_btc = lead_lag_pairs.get("QQQ:BTC")
+            if qqq_btc is not None and hasattr(qqq_btc, "interpretation"):
+                lead_lag_text = str(getattr(qqq_btc, "interpretation"))
+        if lead_lag_text is None:
+            qqq_returns = aggregator.correlation_engine.get_returns("QQQ")
+            btc_returns = aggregator.correlation_engine.get_returns("BTC")
+            if qqq_returns is not None and btc_returns is not None:
+                lead_lag_text = compute_lead_lag(qqq_returns, btc_returns, "QQQ", "BTC").interpretation
+        if lead_lag_text:
+            lines.extend(["", f"<i>{html.escape(lead_lag_text, quote=False)}</i>"])
+
+        await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    except Exception as exc:
+        logger.exception("Correlation command failed")
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Correlation lookup failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def regime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    regime = context.bot_data.get("current_regime")
+    if regime is None:
+        data = await _latest_briefing_data(context)
+        regime = data.regime_state
+    if regime is None:
+        await update.message.reply_text("Regime detection not yet run.")
+        return
+
+    regime_name = str(getattr(regime.regime, "value", regime.regime))
+    emoji_map = {
+        "risk_on": "\U0001F7E2",
+        "risk_off": "\U0001F534",
+        "divergent": "\U0001F504",
+        "volatile": "\U0001F7E1",
+        "unknown": "\u26AA",
+    }
+    corr_text = f"{regime.btc_qqq_corr:+.2f}" if regime.btc_qqq_corr is not None else "N/A"
+    divergence_text = f"{regime.divergence_speed:+.2f}" if regime.divergence_speed is not None else "N/A"
+    text = (
+        f"{emoji_map.get(regime_name, '\u26AA')} <b>MARKET REGIME: {html.escape(regime_name.upper())}</b>\n"
+        f"Confidence: {regime.confidence:.0%}\n\n"
+        f"{html.escape(regime.description, quote=False)}\n\n"
+        f"\U0001F4C8 <b>Stocks:</b> {html.escape(regime.implication_stocks, quote=False)}\n"
+        f"\U0001FA99 <b>Crypto:</b> {html.escape(regime.implication_crypto, quote=False)}\n\n"
+        f"BTC-QQQ corr: {corr_text}\n"
+        f"VIX: {html.escape(regime.vix_level)}\n"
+        f"Divergence speed: {divergence_text}"
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /signals &lt;symbol&gt;")
+        return
+
+    symbol = context.args[0].strip().upper()
+    data = await _latest_briefing_data(context)
+    composite = data.composite_scores.get(symbol)
+    if composite is None:
+        await update.message.reply_text(f"No composite data for {html.escape(symbol)}.")
+        return
+
+    lines = [f"\U0001F4CA <b>SIGNAL BREAKDOWN: {html.escape(symbol)}</b>", ""]
+    for name, value in sorted(composite.signal_breakdown.items(), key=lambda item: abs(item[1]), reverse=True):
+        direction = "\U0001F4C8" if value > 0 else ("\U0001F4C9" if value < 0 else "\u26AA")
+        bar = "#" * min(20, max(0, int(abs(value) * 20)))
+        bar = bar.ljust(20, "-")
+        lines.append(f"{direction} <code>{name:<12} {value:+.3f} [{bar}]</code>")
+
+    lines.extend(
+        [
+            "",
+            f"<b>Composite:</b> {html.escape(composite.direction.replace('_', ' ').upper())} ({composite.score:+.2f})",
+            f"Agreement: {composite.agreement:.0%}",
+            "",
+            f"<i>{html.escape(composite.summary, quote=False)}</i>",
+        ]
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def ta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -797,6 +937,9 @@ async def _latest_briefing_data(context: ContextTypes.DEFAULT_TYPE) -> BriefingD
 
 def _store_latest_briefing(context: ContextTypes.DEFAULT_TYPE, data: BriefingData) -> None:
     context.bot_data["latest_briefing_data"] = data
+    context.bot_data["current_regime"] = data.regime_state
+    context.bot_data["composite_scores"] = data.composite_scores
+    context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
 
 
 def _format_playbook_message(

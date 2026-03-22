@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.agents.state import AgentAnalysis
+from src.correlation.models import LeadLagResult, PairCorrelation, RegimeState
 from src.data.base import AssetPrice, DeFiProtocol, EarningsEvent, NewsItem, SECFiling
 from src.events.models import DetectedEvent
+from src.signals.models import CompositeScore
+from src.ta.signals import TASignal
 
 
 @dataclass(slots=True)
@@ -35,5 +38,11 @@ class BriefingData:
     coingecko_usage: tuple[int, int]
 
     event_data: list[DetectedEvent] = field(default_factory=list)
+    ta_signals: dict[str, TASignal] = field(default_factory=dict)
+    correlation_pairs: dict[str, PairCorrelation] = field(default_factory=dict)
+    lead_lag_pairs: dict[str, LeadLagResult] = field(default_factory=dict)
+    correlation_top_movers: list[PairCorrelation] = field(default_factory=list)
+    regime_state: RegimeState | None = None
+    composite_scores: dict[str, CompositeScore] = field(default_factory=dict)
     agent_analysis: AgentAnalysis | None = None
     failed_sections: list[str] = field(default_factory=list)

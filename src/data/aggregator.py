@@ -2,15 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar, cast
 from zoneinfo import ZoneInfo
 
 from src.briefing.models import BriefingData
 from src.config import Settings
+from src.correlation import (
+    CorrelationEngine,
+    CorrelationSnapshot,
+    LeadLagResult,
+    MarketRegime,
+    PairCorrelation,
+    RegimeState,
+    compute_lead_lag,
+    detect_regime,
+)
 from src.data.base import (
     AssetPrice,
     AssetType,
@@ -32,9 +43,12 @@ from src.reflection.reflector import get_latest_lessons, run_weekly_reflection
 from src.reflection.tracker import PredictionTracker
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.sentiment.cache import SentimentCache
+from src.signals import CompositeScore, SignalInput, compute_composite
 from src.storage.database import Database, WatchlistItem
 from src.ta.candles import fetch_crypto_candles, fetch_stock_candles
 from src.ta.signals import TASignal, compute_signals
+
+import numpy as np
 
 if TYPE_CHECKING:
     from src.agents.graph import AgentPipeline
@@ -44,22 +58,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 PRICE_TARGET_RE = re.compile(r"\$([0-9][0-9,]*(?:\.\d+)?)")
+SIGNAL_CONTEXT_PROXIES = ("SPY", "QQQ", "VIXY")
 
 PLAYBOOK_SYSTEM_PROMPT = """You are a concise financial analyst creating a daily playbook.
-For each asset provided, write a brief actionable paragraph in this exact format:
+For each asset, write a brief actionable paragraph in this exact format:
 
 SYMBOL (current_price, change%)
 What happened: [1 sentence on the key event or move]
-What it means: [1 sentence on why this matters]
+Technical picture: [1 sentence on RSI, MACD, Bollinger status]
 Historical context: [1 sentence using CAR data if available]
+Correlation context: [1 sentence on how this asset relates to the broader market]
+Composite signal: [state the composite score and what it means]
 Watch for: [1 specific trigger - price level, event, or date]
 Scenario: If [X happens], expect [Y]. If [Z happens], expect [W].
 
 Rules:
-- Be specific with numbers such as price levels, percentages, and dates.
-- Reference the detected event type and CAR data when available.
+- Reference specific TA numbers such as RSI, MACD, Bollinger position, and ATR when available.
+- Reference the composite score, signal agreement, and market regime when available.
+- If TA and sentiment disagree, explicitly note the conflict.
 - Do NOT give buy or sell advice. Frame everything as information and scenarios.
-- Keep each asset to exactly 6 lines as shown above.
+- Keep each asset to exactly 7 lines as shown above.
 - Include both stocks and crypto in the same response.
 - Do not use markdown bullets, code fences, or extra commentary."""
 
@@ -94,6 +112,8 @@ class DataAggregator:
         self.sentiment_cache = SentimentCache(db=db)
         self.tracker = PredictionTracker(settings.db_path)
         self.reflection_evaluator = ReflectionEvaluator(settings.db_path)
+        self.correlation_engine = CorrelationEngine()
+        self.current_regime: RegimeState | None = None
         self._gemini_client: GeminiClient | None = None
         self._agent_pipeline: AgentPipeline | None = None
         self._agent_pipeline_init_error: str | None = None
@@ -109,6 +129,10 @@ class DataAggregator:
             await self.sentiment_analyzer.initialize()
         except Exception:
             logger.exception("Sentiment analyzer initialization failed; continuing without sentiment")
+        try:
+            self.current_regime = await self.db.latest_regime_state()
+        except Exception:
+            logger.exception("Failed to load latest stored regime state")
         await self._ensure_agent_pipeline()
 
     async def close(self) -> None:
@@ -187,6 +211,442 @@ class DataAggregator:
         if signal is None:
             return None
         return cast(dict[str, object], asdict(signal))
+
+    async def update_correlation_engine(self, *, persist: bool = True) -> dict[int, CorrelationSnapshot]:
+        watchlist = await self.db.get_watchlist()
+        stock_symbols = [item.symbol for item in watchlist if item.asset_type == "stock"]
+        crypto_items = [item for item in watchlist if item.asset_type == "crypto" and item.coingecko_id]
+        candle_map = await self._load_signal_candles(stock_symbols, crypto_items, include_proxies=True)
+        return await self._refresh_correlation_from_candles(candle_map, persist=persist)
+
+    async def refresh_regime_state(
+        self,
+        *,
+        index_prices: list[AssetPrice] | None = None,
+        crypto_prices: list[AssetPrice] | None = None,
+        snapshots: dict[int, CorrelationSnapshot] | None = None,
+        persist: bool = True,
+    ) -> RegimeState | None:
+        if snapshots is None:
+            snapshots = self.correlation_engine.compute_all_windows()
+            if not snapshots:
+                snapshots = await self.update_correlation_engine(persist=persist)
+
+        if index_prices is None or crypto_prices is None:
+            watchlist = await self.db.get_watchlist()
+            crypto_items = [item for item in watchlist if item.asset_type == "crypto" and item.coingecko_id]
+            index_prices, crypto_prices = await asyncio.gather(
+                self.market_indices.get_index_prices(self.finnhub),
+                self._fetch_crypto_prices(crypto_items),
+            )
+
+        btc_qqq_pair = self.correlation_engine.get_pair_analysis("BTC", "QQQ")
+        regime_state = detect_regime(
+            btc_qqq_corr_20d=(btc_qqq_pair.corr_20d if btc_qqq_pair is not None else None),
+            btc_qqq_corr_60d=(btc_qqq_pair.corr_60d if btc_qqq_pair is not None else None),
+            vix_proxy_change=self._price_change_for_symbols(index_prices, {"VIX", "VIXY"}),
+            spy_change_pct=self._price_change_for_symbols(index_prices, {"SPY", "S&P 500"}),
+            btc_change_pct=self._price_change_for_symbols(crypto_prices, {"BTC"}),
+        )
+        self.current_regime = regime_state
+        if persist:
+            await self.db.store_regime_state(regime_state)
+        return regime_state
+
+    async def _build_phase6_context(
+        self,
+        *,
+        stock_items: list[WatchlistItem],
+        crypto_items: list[WatchlistItem],
+        stock_prices: list[AssetPrice],
+        crypto_prices: list[AssetPrice],
+        index_prices: list[AssetPrice],
+        news_items: list[NewsItem],
+        event_data: list[DetectedEvent],
+        agent_analysis: AgentAnalysis | None = None,
+        persist: bool = False,
+    ) -> tuple[
+        dict[str, TASignal],
+        dict[str, PairCorrelation],
+        dict[str, LeadLagResult],
+        list[PairCorrelation],
+        RegimeState | None,
+        dict[str, CompositeScore],
+    ]:
+        candle_map = await self._load_signal_candles(
+            [item.symbol for item in stock_items],
+            crypto_items,
+            include_proxies=True,
+        )
+        ta_signals = self._ta_signal_map_from_candles(
+            candle_map,
+            {item.symbol.upper() for item in [*stock_items, *crypto_items]},
+        )
+        snapshots = await self._refresh_correlation_from_candles(candle_map, persist=persist)
+        correlation_pairs = self._build_asset_correlation_pairs([*stock_prices, *crypto_prices])
+        lead_lag_pairs = self._build_lead_lag_pairs()
+        correlation_top_movers = self.correlation_engine.get_top_movers(3)
+        regime_state = await self.refresh_regime_state(
+            index_prices=index_prices,
+            crypto_prices=crypto_prices,
+            snapshots=snapshots,
+            persist=persist,
+        )
+        composite_scores = self._compute_composite_scores(
+            stock_prices=stock_prices,
+            crypto_prices=crypto_prices,
+            news_items=news_items,
+            event_data=event_data,
+            ta_signals=ta_signals,
+            correlation_pairs=correlation_pairs,
+            regime_state=regime_state,
+            agent_analysis=agent_analysis,
+        )
+        return (
+            ta_signals,
+            correlation_pairs,
+            lead_lag_pairs,
+            correlation_top_movers,
+            regime_state,
+            composite_scores,
+        )
+
+    async def _load_signal_candles(
+        self,
+        stock_symbols: list[str],
+        crypto_items: list[WatchlistItem],
+        *,
+        include_proxies: bool,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+        stock_universe = {symbol.upper() for symbol in stock_symbols}
+        if include_proxies:
+            stock_universe.update(SIGNAL_CONTEXT_PROXIES)
+
+        stock_jobs = [
+            fetch_stock_candles(
+                symbol,
+                self.settings.finnhub_api_key.get_secret_value(),
+                db_path=self.settings.db_path,
+            )
+            for symbol in sorted(stock_universe)
+        ]
+        crypto_symbols: list[str] = []
+        crypto_jobs: list[asyncio.Future[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None] | asyncio.Task[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None] | object] = []
+        for item in crypto_items:
+            if item.coingecko_id is None:
+                continue
+            crypto_symbols.append(item.symbol.upper())
+            crypto_jobs.append(fetch_crypto_candles(item.coingecko_id, db_path=self.settings.db_path))
+
+        stock_results = await asyncio.gather(*stock_jobs, return_exceptions=True)
+        for symbol, result in zip(sorted(stock_universe), stock_results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("Signal candle fetch failed for %s: %s", symbol, result)
+                continue
+            if result is not None:
+                candle_map[symbol] = result
+
+        crypto_results = await asyncio.gather(*crypto_jobs, return_exceptions=True)
+        for symbol, result in zip(crypto_symbols, crypto_results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning("Signal candle fetch failed for %s: %s", symbol, result)
+                continue
+            if result is not None:
+                candle_map[symbol] = result
+
+        return candle_map
+
+    def _ta_signal_map_from_candles(
+        self,
+        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        symbols: set[str],
+    ) -> dict[str, TASignal]:
+        ta_signals: dict[str, TASignal] = {}
+        for symbol in sorted(symbols):
+            candles = candle_map.get(symbol.upper())
+            if candles is None:
+                continue
+            try:
+                close, high, low, _volume = candles
+                ta_signals[symbol.upper()] = compute_signals(symbol.upper(), close, high, low, timeframe="daily")
+            except Exception:
+                logger.exception("TA signal build failed for %s", symbol.upper())
+        return ta_signals
+
+    async def _refresh_correlation_from_candles(
+        self,
+        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        *,
+        persist: bool,
+    ) -> dict[int, CorrelationSnapshot]:
+        close_prices = {
+            symbol: candles[0]
+            for symbol, candles in candle_map.items()
+            if len(candles[0]) >= 20
+        }
+        self.correlation_engine.update_prices(close_prices)
+        snapshots = self.correlation_engine.compute_all_windows()
+        if persist and snapshots:
+            await self._store_correlation_snapshots(snapshots)
+        return snapshots
+
+    async def _store_correlation_snapshots(self, snapshots: dict[int, CorrelationSnapshot]) -> None:
+        rows: list[tuple[int, str, str, float, float | None, str | None]] = []
+        for window, snapshot in snapshots.items():
+            symbols = snapshot.symbols
+            for idx_a, symbol_a in enumerate(symbols):
+                for idx_b in range(idx_a + 1, len(symbols)):
+                    symbol_b = symbols[idx_b]
+                    correlation = float(snapshot.matrix[idx_a, idx_b])
+                    z_score: float | None = None
+                    regime: str | None = None
+                    if window == 20:
+                        pair = self.correlation_engine.get_pair_analysis(symbol_a, symbol_b)
+                        if pair is not None:
+                            z_score = pair.z_score
+                            regime = pair.regime_signal
+                    rows.append((window, symbol_a, symbol_b, correlation, z_score, regime))
+        await self.db.store_correlation_rows(rows)
+
+    def _build_asset_correlation_pairs(self, prices: list[AssetPrice]) -> dict[str, PairCorrelation]:
+        pairs: dict[str, PairCorrelation] = {}
+        for price in prices:
+            symbol = price.symbol.upper()
+            partner = self._correlation_partner(symbol, price.asset_type)
+            pair = self.correlation_engine.get_pair_analysis(symbol, partner)
+            if pair is None and price.asset_type == AssetType.STOCK:
+                pair = self.correlation_engine.get_pair_analysis(symbol, "QQQ")
+            if pair is None and price.asset_type == AssetType.CRYPTO:
+                pair = self.correlation_engine.get_pair_analysis(symbol, "ETH")
+            if pair is not None:
+                pairs[symbol] = pair
+        return pairs
+
+    def _build_lead_lag_pairs(self) -> dict[str, LeadLagResult]:
+        lead_lag: dict[str, LeadLagResult] = {}
+        for symbol_a, symbol_b in [("QQQ", "BTC"), ("SPY", "BTC"), ("BTC", "ETH"), ("ETH", "SOL"), ("NVDA", "BTC")]:
+            returns_a = self.correlation_engine.get_returns(symbol_a)
+            returns_b = self.correlation_engine.get_returns(symbol_b)
+            if returns_a is None or returns_b is None:
+                continue
+            lead_lag[f"{symbol_a}:{symbol_b}"] = compute_lead_lag(returns_a, returns_b, symbol_a, symbol_b)
+        return lead_lag
+
+    def _compute_composite_scores(
+        self,
+        *,
+        stock_prices: list[AssetPrice],
+        crypto_prices: list[AssetPrice],
+        news_items: list[NewsItem],
+        event_data: list[DetectedEvent],
+        ta_signals: dict[str, TASignal],
+        correlation_pairs: dict[str, PairCorrelation],
+        regime_state: RegimeState | None,
+        agent_analysis: AgentAnalysis | None,
+    ) -> dict[str, CompositeScore]:
+        prices = [*stock_prices, *crypto_prices]
+        regime_key = regime_state.regime.value if regime_state is not None else "default"
+        verdicts = {
+            verdict.symbol.upper(): verdict
+            for verdict in (agent_analysis.debate_verdicts if agent_analysis is not None else [])
+        }
+
+        composite_scores: dict[str, CompositeScore] = {}
+        for price in prices:
+            symbol = price.symbol.upper()
+            inputs = self._build_signal_inputs(
+                price=price,
+                news_items=news_items,
+                event_data=event_data,
+                ta_signal=ta_signals.get(symbol),
+                correlation_pair=correlation_pairs.get(symbol),
+                regime_state=regime_state,
+                agent_verdict=verdicts.get(symbol),
+            )
+            composite_scores[symbol] = compute_composite(symbol, inputs, regime=regime_key)
+        return composite_scores
+
+    def _build_signal_inputs(
+        self,
+        *,
+        price: AssetPrice,
+        news_items: list[NewsItem],
+        event_data: list[DetectedEvent],
+        ta_signal: TASignal | None,
+        correlation_pair: PairCorrelation | None,
+        regime_state: RegimeState | None,
+        agent_verdict: object | None,
+    ) -> list[SignalInput]:
+        now = time.time()
+        symbol = price.symbol.upper()
+        symbol_news = [
+            item for item in news_items if symbol in {related.upper() for related in item.related_symbols}
+        ]
+        symbol_events = [
+            item for item in event_data if symbol in {related.upper() for related in item.related_symbols}
+        ]
+        signals: list[SignalInput] = []
+
+        if symbol_news:
+            strongest_news = max(
+                symbol_news,
+                key=lambda item: (
+                    abs(item.sentiment_score or 0.0),
+                    self._timestamp_from_iso(item.published_at),
+                ),
+            )
+            if strongest_news.sentiment_score is not None:
+                signals.append(
+                    SignalInput(
+                        name="sentiment",
+                        value=float(np.clip(strongest_news.sentiment_score, -1.0, 1.0)),
+                        confidence=float(strongest_news.sentiment_confidence or 0.5),
+                        timestamp=self._timestamp_from_iso(strongest_news.published_at),
+                        half_life_hours=12.0,
+                    )
+                )
+
+        if ta_signal is not None:
+            signals.append(
+                SignalInput(
+                    name="ta",
+                    value=self._normalize_ta_signal(ta_signal.overall_signal),
+                    confidence=float(ta_signal.confidence),
+                    timestamp=now,
+                    half_life_hours=72.0,
+                )
+            )
+
+        if symbol_events:
+            strongest_event = max(
+                symbol_events,
+                key=lambda item: abs(item.remaining_drift_pct or item.expected_car_pct or 0.0) * item.confidence,
+            )
+            event_value = strongest_event.remaining_drift_pct
+            if event_value is None:
+                event_value = strongest_event.expected_car_pct
+            if event_value is not None:
+                signals.append(
+                    SignalInput(
+                        name="event",
+                        value=float(np.clip(event_value / 5.0, -1.0, 1.0)),
+                        confidence=float(strongest_event.confidence),
+                        timestamp=self._timestamp_for_event(strongest_event, symbol_news, now),
+                        half_life_hours=48.0,
+                    )
+                )
+
+        correlation_signal = self._correlation_signal_input(price, correlation_pair, regime_state, now)
+        if correlation_signal is not None:
+            signals.append(correlation_signal)
+
+        if agent_verdict is not None:
+            prevailing_view = getattr(agent_verdict, "prevailing_view", "neutral")
+            confidence = getattr(agent_verdict, "confidence", 0.5)
+            signals.append(
+                SignalInput(
+                    name="agent",
+                    value=self._normalize_agent_view(str(prevailing_view)),
+                    confidence=float(confidence),
+                    timestamp=now,
+                    half_life_hours=72.0,
+                )
+            )
+
+        return signals
+
+    def _correlation_signal_input(
+        self,
+        price: AssetPrice,
+        pair: PairCorrelation | None,
+        regime_state: RegimeState | None,
+        now: float,
+    ) -> SignalInput | None:
+        regime_key = regime_state.regime.value if regime_state is not None else "default"
+        if regime_key == "risk_on":
+            base_value = 0.25
+        elif regime_key == "risk_off":
+            base_value = -0.25
+        elif regime_key == "divergent":
+            base_value = 0.30 if price.asset_type == AssetType.CRYPTO else -0.10
+        elif regime_key == "volatile":
+            base_value = 0.0
+        else:
+            base_value = 0.05
+
+        pair_bias = 0.0
+        confidence = 0.35
+        if pair is not None:
+            if pair.regime_signal == "coupling":
+                pair_bias = 0.15
+            elif pair.regime_signal == "decoupling":
+                pair_bias = 0.15 if price.asset_type == AssetType.CRYPTO else -0.10
+            elif pair.regime_signal == "anomalous":
+                sign = math.copysign(1.0, pair.z_score if pair.z_score != 0 else pair.divergence or 1.0)
+                pair_bias = 0.15 * sign
+            confidence = min(0.95, 0.45 + min(0.25, abs(pair.divergence)) + min(0.20, abs(pair.z_score) * 0.05))
+
+        value = float(np.clip(base_value + pair_bias, -1.0, 1.0))
+        return SignalInput(
+            name="correlation",
+            value=value,
+            confidence=confidence,
+            timestamp=now,
+            half_life_hours=168.0,
+        )
+
+    @staticmethod
+    def _correlation_partner(symbol: str, asset_type: AssetType) -> str:
+        if asset_type == AssetType.STOCK:
+            return "QQQ" if symbol in {"SPY", "QQQ"} else "SPY"
+        return "QQQ" if symbol == "BTC" else "BTC"
+
+    @staticmethod
+    def _price_change_for_symbols(prices: list[AssetPrice], symbols: set[str]) -> float:
+        target_symbols = {symbol.upper() for symbol in symbols}
+        for price in prices:
+            if price.symbol.upper() in target_symbols:
+                return price.change_24h_pct
+        return 0.0
+
+    @staticmethod
+    def _timestamp_from_iso(value: str) -> float:
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return time.time()
+
+    @staticmethod
+    def _timestamp_for_event(
+        event: DetectedEvent,
+        symbol_news: list[NewsItem],
+        fallback: float,
+    ) -> float:
+        for item in symbol_news:
+            if item.headline == event.headline:
+                return DataAggregator._timestamp_from_iso(item.published_at)
+        return fallback
+
+    @staticmethod
+    def _normalize_ta_signal(signal: str) -> float:
+        mapping = {
+            "strong_buy": 1.0,
+            "buy": 0.5,
+            "neutral": 0.0,
+            "sell": -0.5,
+            "strong_sell": -1.0,
+        }
+        return mapping.get(signal, 0.0)
+
+    @staticmethod
+    def _normalize_agent_view(view: str) -> float:
+        mapping = {
+            "bullish": 1.0,
+            "neutral": 0.0,
+            "bearish": -1.0,
+        }
+        return mapping.get(view, 0.0)
 
     async def record_prediction_outcomes(self) -> int:
         return await self.tracker.record_outcomes(self.get_current_price)
@@ -337,6 +797,34 @@ class DataAggregator:
         defi_movers: list[DeFiProtocol]
         total_tvl, tvl_change_24h_pct, defi_movers = defi_data
 
+        ta_signals: dict[str, TASignal] = {}
+        correlation_pairs: dict[str, PairCorrelation] = {}
+        lead_lag_pairs: dict[str, LeadLagResult] = {}
+        correlation_top_movers: list[PairCorrelation] = []
+        regime_state: RegimeState | None = None
+        composite_scores: dict[str, CompositeScore] = {}
+        try:
+            (
+                ta_signals,
+                correlation_pairs,
+                lead_lag_pairs,
+                correlation_top_movers,
+                regime_state,
+                composite_scores,
+            ) = await self._build_phase6_context(
+                stock_items=stock_items,
+                crypto_items=crypto_items,
+                stock_prices=stock_prices,
+                crypto_prices=crypto_prices,
+                index_prices=index_prices,
+                news_items=news_items,
+                event_data=event_data,
+                persist=False,
+            )
+        except Exception:
+            logger.exception("Failed to compute Phase 6 signal context")
+            failed_sections.append("signal_context")
+
         briefing_data = BriefingData(
             generated_at=now,
             is_weekend=is_weekend,
@@ -354,12 +842,32 @@ class DataAggregator:
             trending_crypto=trending,
             coingecko_usage=coingecko_usage,
             event_data=event_data,
+            ta_signals=ta_signals,
+            correlation_pairs=correlation_pairs,
+            lead_lag_pairs=lead_lag_pairs,
+            correlation_top_movers=correlation_top_movers,
+            regime_state=regime_state,
+            composite_scores=composite_scores,
             agent_analysis=None,
             failed_sections=sorted(set(failed_sections)),
         )
 
         if include_agent_analysis:
             briefing_data.agent_analysis = await self.run_agent_analysis(briefing_data)
+            if briefing_data.agent_analysis is not None:
+                try:
+                    briefing_data.composite_scores = self._compute_composite_scores(
+                        stock_prices=stock_prices,
+                        crypto_prices=crypto_prices,
+                        news_items=news_items,
+                        event_data=event_data,
+                        ta_signals=briefing_data.ta_signals,
+                        correlation_pairs=briefing_data.correlation_pairs,
+                        regime_state=briefing_data.regime_state,
+                        agent_analysis=briefing_data.agent_analysis,
+                    )
+                except Exception:
+                    logger.exception("Failed to recompute composite scores with agent context")
 
         return briefing_data
 
@@ -573,6 +1081,21 @@ class DataAggregator:
                         f"  Historical CAR: {asset['expected_car_text']} over {asset['expected_car_window']}",
                         f"  Remaining drift: {asset['remaining_drift_text']}",
                         f"  Latest headline: {asset['headline']}",
+                        "  --- Technical Analysis ---",
+                        f"  RSI(14): {asset['rsi_value_text']} ({asset['rsi_signal']})",
+                        f"  MACD: {asset['macd_signal']} (histogram: {asset['macd_histogram_text']})",
+                        f"  Bollinger: {asset['bb_position']} {asset['bb_squeeze_text']}".rstrip(),
+                        f"  Trend: {asset['trend']} (EMA20 vs EMA50)",
+                        f"  ATR: {asset['atr_pct_text']} ({asset['volatility']})",
+                        f"  TA Signal: {asset['ta_overall']} ({asset['ta_confidence_text']})",
+                        "  --- Correlation Context ---",
+                        f"  Pair correlation: {asset['pair_label']} 20d={asset['pair_corr_20d_text']} 60d={asset['pair_corr_60d_text']}",
+                        f"  Pair regime: {asset['pair_regime']}",
+                        f"  BTC-QQQ 20d corr: {asset['btc_qqq_corr_text']}",
+                        f"  Regime: {asset['regime']}",
+                        "  --- Composite Score ---",
+                        f"  Score: {asset['composite_score_text']} ({asset['composite_direction']})",
+                        f"  Signal agreement: {asset['signal_agreement_text']}",
                     ]
                 )
             )
@@ -639,6 +1162,107 @@ class DataAggregator:
                     "expected_car_window": event.expected_car_window if event and event.expected_car_window else "N/A",
                     "remaining_drift_text": self._playbook_pct_text(event.remaining_drift_pct if event is not None else None),
                     "headline": news_item.headline if news_item is not None else "N/A",
+                    "rsi_value_text": self._playbook_number_text(
+                        briefing_data.ta_signals.get(symbol_upper).rsi_value
+                        if symbol_upper in briefing_data.ta_signals
+                        else None,
+                        precision=1,
+                    ),
+                    "rsi_signal": (
+                        briefing_data.ta_signals[symbol_upper].rsi_signal
+                        if symbol_upper in briefing_data.ta_signals
+                        else "N/A"
+                    ),
+                    "macd_signal": (
+                        briefing_data.ta_signals[symbol_upper].macd_signal
+                        if symbol_upper in briefing_data.ta_signals
+                        else "N/A"
+                    ),
+                    "macd_histogram_text": self._playbook_number_text(
+                        briefing_data.ta_signals.get(symbol_upper).macd_histogram
+                        if symbol_upper in briefing_data.ta_signals
+                        else None,
+                        precision=3,
+                    ),
+                    "bb_position": (
+                        briefing_data.ta_signals[symbol_upper].bb_position
+                        if symbol_upper in briefing_data.ta_signals
+                        else "N/A"
+                    ),
+                    "bb_squeeze_text": (
+                        "(SQUEEZE!)"
+                        if symbol_upper in briefing_data.ta_signals and briefing_data.ta_signals[symbol_upper].bb_squeeze
+                        else ""
+                    ),
+                    "trend": (
+                        briefing_data.ta_signals[symbol_upper].trend
+                        if symbol_upper in briefing_data.ta_signals
+                        else "N/A"
+                    ),
+                    "atr_pct_text": self._playbook_pct_text(
+                        briefing_data.ta_signals.get(symbol_upper).atr_pct
+                        if symbol_upper in briefing_data.ta_signals
+                        else None,
+                    ),
+                    "volatility": (
+                        briefing_data.ta_signals[symbol_upper].volatility
+                        if symbol_upper in briefing_data.ta_signals
+                        else "N/A"
+                    ),
+                    "ta_overall": (
+                        briefing_data.ta_signals[symbol_upper].overall_signal
+                        if symbol_upper in briefing_data.ta_signals
+                        else "N/A"
+                    ),
+                    "ta_confidence_text": self._playbook_confidence_text(
+                        briefing_data.ta_signals.get(symbol_upper).confidence
+                        if symbol_upper in briefing_data.ta_signals
+                        else None,
+                    ),
+                    "pair_label": self._pair_label(briefing_data.correlation_pairs.get(symbol_upper)),
+                    "pair_corr_20d_text": self._playbook_number_text(
+                        briefing_data.correlation_pairs.get(symbol_upper).corr_20d
+                        if symbol_upper in briefing_data.correlation_pairs
+                        else None,
+                        precision=2,
+                    ),
+                    "pair_corr_60d_text": self._playbook_number_text(
+                        briefing_data.correlation_pairs.get(symbol_upper).corr_60d
+                        if symbol_upper in briefing_data.correlation_pairs
+                        else None,
+                        precision=2,
+                    ),
+                    "pair_regime": (
+                        briefing_data.correlation_pairs[symbol_upper].regime_signal
+                        if symbol_upper in briefing_data.correlation_pairs
+                        else "N/A"
+                    ),
+                    "btc_qqq_corr_text": self._playbook_number_text(
+                        briefing_data.regime_state.btc_qqq_corr if briefing_data.regime_state is not None else None,
+                        precision=2,
+                    ),
+                    "regime": (
+                        briefing_data.regime_state.regime.value
+                        if briefing_data.regime_state is not None
+                        else "N/A"
+                    ),
+                    "composite_score_text": self._playbook_number_text(
+                        briefing_data.composite_scores.get(symbol_upper).score
+                        if symbol_upper in briefing_data.composite_scores
+                        else None,
+                        precision=2,
+                        signed=True,
+                    ),
+                    "composite_direction": (
+                        briefing_data.composite_scores[symbol_upper].direction
+                        if symbol_upper in briefing_data.composite_scores
+                        else "N/A"
+                    ),
+                    "signal_agreement_text": self._playbook_confidence_text(
+                        briefing_data.composite_scores.get(symbol_upper).agreement
+                        if symbol_upper in briefing_data.composite_scores
+                        else None,
+                    ),
                     "sort_key": (
                         1 if has_event else 0,
                         abs(price.change_24h_pct),
@@ -661,6 +1285,30 @@ class DataAggregator:
         if value is None:
             return "N/A"
         return f"{value:+.2f}"
+
+    @staticmethod
+    def _playbook_number_text(
+        value: float | None,
+        *,
+        precision: int,
+        signed: bool = False,
+    ) -> str:
+        if value is None:
+            return "N/A"
+        sign = "+" if signed else ""
+        return f"{value:{sign}.{precision}f}"
+
+    @staticmethod
+    def _playbook_confidence_text(value: float | None) -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:.0%}"
+
+    @staticmethod
+    def _pair_label(pair: PairCorrelation | None) -> str:
+        if pair is None:
+            return "N/A"
+        return f"{pair.symbol_a}-{pair.symbol_b}"
 
     @staticmethod
     def _playbook_price_text(price: AssetPrice) -> str:

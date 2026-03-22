@@ -102,7 +102,11 @@ class AgentPipeline:
         started_at = time.perf_counter()
         initial_state = self._serialize_briefing_data(briefing_data)
         initial_state["forced_symbols"] = [symbol.upper() for symbol in forced_symbols or []]
-        initial_state["ta_signals"] = {}
+        initial_state.setdefault("ta_signals", {})
+        initial_state.setdefault("correlation_pairs", {})
+        initial_state.setdefault("lead_lag_pairs", {})
+        initial_state.setdefault("composite_scores", {})
+        initial_state.setdefault("regime_state", None)
         initial_state["reflection_lessons"] = await self._load_reflection_lessons()
         initial_state["llm_call_count"] = 0
         initial_state["errors"] = []
@@ -148,10 +152,17 @@ class AgentPipeline:
             for symbol, payload in _coerce_mapping(final_state.get("ta_signals")).items()
             if isinstance(payload, dict)
         }
+        composite_scores = {
+            str(symbol).upper(): payload
+            for symbol, payload in _coerce_mapping(final_state.get("composite_scores")).items()
+            if isinstance(payload, dict)
+        }
+        regime_state = _coerce_mapping(final_state.get("regime_state"))
         for verdict in _coerce_dict_list(final_state.get("debate_verdicts")):
             symbol = _coerce_text(verdict.get("symbol")) or "?"
             selected = selected_by_symbol.get(symbol.upper(), {})
             ta_signal = ta_signals.get(symbol.upper(), {})
+            composite = composite_scores.get(symbol.upper(), {})
             analysis.debate_verdicts.append(
                 DebateVerdict(
                     symbol=symbol,
@@ -165,14 +176,21 @@ class AgentPipeline:
                     action_context=_coerce_text(verdict.get("what_to_watch")),
                     selection_reason=_coerce_text(selected.get("reason")),
                     ta_summary=_coerce_text(ta_signal.get("summary")),
+                    composite_summary=_coerce_text(composite.get("summary")),
+                    regime_context=_coerce_text(regime_state.get("description")),
                 )
             )
 
         return analysis
 
     async def _build_ta_context(self, state: Mapping[str, object]) -> dict[str, object]:
+        existing_ta_signals = {
+            str(symbol).upper(): payload
+            for symbol, payload in _coerce_mapping(state.get("ta_signals")).items()
+            if isinstance(payload, dict)
+        }
         if self._ta_signal_fetcher is None:
-            return {"ta_signals": {}}
+            return {"ta_signals": existing_ta_signals}
 
         movers = _coerce_dict_list(state.get("selected_movers"))
         symbols = list(
@@ -183,13 +201,13 @@ class AgentPipeline:
             )
         )
         if not symbols:
-            return {"ta_signals": {}}
+            return {"ta_signals": existing_ta_signals}
 
         results = await asyncio.gather(
             *(self._ta_signal_fetcher(symbol) for symbol in symbols),
             return_exceptions=True,
         )
-        ta_signals: dict[str, dict[str, object]] = {}
+        ta_signals: dict[str, dict[str, object]] = dict(existing_ta_signals)
         for symbol, result in zip(symbols, results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning("TA context failed for %s: %s", symbol, result)
@@ -221,6 +239,11 @@ class AgentPipeline:
             "tvl_change_pct": _coerce_optional_float(getattr(data, "tvl_change_24h_pct", None)),
             "market_is_open": bool(getattr(data, "market_is_open", False)),
             "is_weekend": bool(getattr(data, "is_weekend", False)),
+            "ta_signals": self._serialize_named_mapping(getattr(data, "ta_signals", {})),
+            "correlation_pairs": self._serialize_named_mapping(getattr(data, "correlation_pairs", {})),
+            "lead_lag_pairs": self._serialize_named_mapping(getattr(data, "lead_lag_pairs", {})),
+            "composite_scores": self._serialize_named_mapping(getattr(data, "composite_scores", {})),
+            "regime_state": self._serialize_optional_dataclass(getattr(data, "regime_state", None)),
         }
 
     @staticmethod
@@ -257,6 +280,35 @@ class AgentPipeline:
                     payload = {"value": str(item)}
             serialized.append(payload)
         return serialized
+
+    @staticmethod
+    def _serialize_named_mapping(items: object) -> dict[str, dict[str, object]]:
+        if not isinstance(items, Mapping):
+            return {}
+
+        serialized: dict[str, dict[str, object]] = {}
+        for key, item in items.items():
+            try:
+                payload = asdict(item)
+            except TypeError:
+                if isinstance(item, dict):
+                    payload = dict(item)
+                else:
+                    continue
+            serialized[str(key).upper()] = payload
+        return serialized
+
+    @staticmethod
+    def _serialize_optional_dataclass(item: object) -> dict[str, object] | None:
+        if item is None:
+            return None
+        try:
+            payload = asdict(item)
+        except TypeError:
+            if isinstance(item, dict):
+                return dict(item)
+            return None
+        return payload
 
 
 def _coerce_dict_list(value: object) -> list[dict[str, object]]:

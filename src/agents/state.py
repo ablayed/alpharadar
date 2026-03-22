@@ -43,6 +43,8 @@ class DebateVerdict:
     action_context: str
     selection_reason: str = ""
     ta_summary: str = ""
+    composite_summary: str = ""
+    regime_context: str = ""
 
 
 @dataclass(slots=True)
@@ -71,6 +73,10 @@ class PipelineState(TypedDict, total=False):
     is_weekend: bool
     forced_symbols: list[str]
     ta_signals: dict[str, dict[str, object]]
+    correlation_pairs: dict[str, dict[str, object]]
+    lead_lag_pairs: dict[str, dict[str, object]]
+    composite_scores: dict[str, dict[str, object]]
+    regime_state: dict[str, object] | None
     reflection_lessons: str
 
     market_report: dict[str, object] | None
