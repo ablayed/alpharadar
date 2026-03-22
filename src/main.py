@@ -130,6 +130,11 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
     stock_symbols = [item.symbol for item in watchlist if item.asset_type == "stock"]
     crypto_symbols = [item.symbol for item in watchlist if item.asset_type == "crypto"]
     chat_id: int | str = int(settings.telegram_chat_id) if settings.telegram_chat_id.isdigit() else settings.telegram_chat_id
+    ws_tasks: dict[str, asyncio.Task[object] | None] = {
+        "finnhub": None,
+        "binance": None,
+    }
+    application.bot_data["ws_tasks"] = ws_tasks
 
     async def on_stock_trade(symbol: str, price: float, volume: int) -> None:
         del volume
@@ -162,13 +167,13 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
 
     finnhub_key = settings.finnhub_api_key.get_secret_value()
     if finnhub_key and stock_symbols:
-        application.create_task(
+        ws_tasks["finnhub"] = application.create_task(
             finnhub_ws_loop(finnhub_key, stock_symbols, on_stock_trade),
             name="finnhub_ws",
         )
 
     if crypto_symbols:
-        application.create_task(
+        ws_tasks["binance"] = application.create_task(
             binance_ws_loop(crypto_symbols, on_crypto_price),
             name="binance_ws",
         )

@@ -555,6 +555,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else "Not available"
     )
     agent_status = aggregator.agent_pipeline_status_text()
+    ws_state = _websocket_status_text(context)
     next_briefing = _next_briefing_text()
     uptime = _uptime_text(context)
 
@@ -567,6 +568,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"📡 SEC EDGAR: {_status_label(health['edgar'])}\n"
         f"🧠 FinBERT: {model_status}\n"
         f"🤖 Agent Pipeline: {agent_status}\n"
+        f"🔌 WebSockets: {ws_state}\n"
         f"📊 Sentiment cache: {sentiment_cache_count:,} headlines cached\n\n"
         f"📋 Watchlist: {len(stocks)} stocks, {len(crypto)} crypto\n"
         f"📅 Next briefing: {next_briefing}\n"
@@ -681,6 +683,31 @@ def _symbol_grid(items: list[WatchlistItem]) -> str:
 
 def _status_label(ok: bool) -> str:
     return "✅ Operational" if ok else "❌ Degraded"
+
+
+def _websocket_status_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    ws_tasks = context.application.bot_data.get("ws_tasks")
+    if not isinstance(ws_tasks, dict):
+        return "Not initialized"
+
+    parts: list[str] = []
+    for name, label in (("finnhub", "Finnhub"), ("binance", "Binance")):
+        task = ws_tasks.get(name)
+        if task is None:
+            parts.append(f"{label} idle")
+            continue
+        if hasattr(task, "cancelled") and task.cancelled():
+            parts.append(f"{label} cancelled")
+            continue
+        if hasattr(task, "done") and task.done():
+            try:
+                exc = task.exception() if hasattr(task, "exception") else None
+            except Exception:
+                exc = None
+            parts.append(f"{label} stopped" if exc else f"{label} done")
+            continue
+        parts.append(f"{label} running")
+    return " | ".join(parts)
 
 
 def _next_briefing_text() -> str:
