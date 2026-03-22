@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 import httpx
@@ -43,11 +45,27 @@ async def fetch_stock_candles(
             )
             response.raise_for_status()
             payload = response.json()
-            await _set_cached_json(db_path, cache_key, payload, ttl_seconds=6 * 3600)
-            return _parse_finnhub_candles(payload)
+            parsed = _parse_finnhub_candles(payload)
+            if parsed is not None:
+                await _set_cached_json(db_path, cache_key, payload, ttl_seconds=6 * 3600)
+                return parsed
+            logger.warning("Finnhub returned unusable candle payload for %s", symbol.upper())
+        except httpx.HTTPError as exc:
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else "request_error"
+            logger.warning(
+                "Finnhub stock candle request failed for %s with status %s",
+                symbol.upper(),
+                status_code,
+            )
         except Exception:
-            logger.exception("Failed to fetch stock candles for %s", symbol.upper())
-            return None
+            logger.exception("Unexpected Finnhub candle failure for %s", symbol.upper())
+
+    fallback_payload = await _fetch_yfinance_stock_candles(symbol.upper(), days)
+    if fallback_payload is None:
+        return None
+
+    await _set_cached_json(db_path, cache_key, fallback_payload, ttl_seconds=6 * 3600)
+    return _parse_finnhub_candles(fallback_payload)
 
 
 async def fetch_crypto_candles(
@@ -115,6 +133,62 @@ def _parse_coingecko_candles(
     close_array = array[:, 4]
     volume_array = np.zeros_like(close_array)
     return close_array, high_array, low_array, volume_array
+
+
+async def _fetch_yfinance_stock_candles(symbol: str, days: int) -> dict[str, object] | None:
+    logger.warning("Falling back to yfinance candles for %s", symbol.upper())
+    try:
+        return await asyncio.to_thread(_download_yfinance_candles, symbol.upper(), days)
+    except Exception:
+        logger.exception("Failed to fetch stock candles from yfinance for %s", symbol.upper())
+        return None
+
+
+def _download_yfinance_candles(symbol: str, days: int) -> dict[str, object] | None:
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("yfinance is not installed; stock candle fallback unavailable for %s", symbol.upper())
+        return None
+
+    end = datetime.now(UTC)
+    start = end - timedelta(days=days + 7)
+    history = yf.Ticker(symbol).history(
+        start=start,
+        end=end + timedelta(days=1),
+        interval="1d",
+        auto_adjust=False,
+    )
+    required_columns = ("Close", "High", "Low", "Volume")
+    if history.empty or any(column not in history for column in required_columns):
+        return None
+
+    close_array = np.asarray(history["Close"], dtype=np.float64)
+    high_array = np.asarray(history["High"], dtype=np.float64)
+    low_array = np.asarray(history["Low"], dtype=np.float64)
+    volume_array = np.asarray(history["Volume"], dtype=np.float64)
+
+    valid_mask = (
+        np.isfinite(close_array)
+        & np.isfinite(high_array)
+        & np.isfinite(low_array)
+        & np.isfinite(volume_array)
+    )
+    close_array = close_array[valid_mask]
+    high_array = high_array[valid_mask]
+    low_array = low_array[valid_mask]
+    volume_array = volume_array[valid_mask]
+
+    if len(close_array) < 60:
+        return None
+
+    return {
+        "c": close_array.tolist(),
+        "h": high_array.tolist(),
+        "l": low_array.tolist(),
+        "v": volume_array.tolist(),
+        "s": "ok",
+    }
 
 
 async def _get_cached_json(db_path: str | None, cache_key: str) -> object | None:
