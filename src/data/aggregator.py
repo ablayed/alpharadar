@@ -60,26 +60,31 @@ T = TypeVar("T")
 PRICE_TARGET_RE = re.compile(r"\$([0-9][0-9,]*(?:\.\d+)?)")
 SIGNAL_CONTEXT_PROXIES = ("SPY", "QQQ", "VIXY")
 
-PLAYBOOK_SYSTEM_PROMPT = """You are a concise financial analyst creating a daily playbook.
-For each asset, write a brief actionable paragraph in this exact format:
+PLAYBOOK_SYSTEM_PROMPT = """You are a financial analyst writing a daily playbook for someone
+who is not a trader and does not know technical jargon.
 
-SYMBOL (current_price, change%)
-What happened: [1 sentence on the key event or move]
-Technical picture: [1 sentence on RSI, MACD, Bollinger status]
-Historical context: [1 sentence using CAR data if available]
-Correlation context: [1 sentence on how this asset relates to the broader market]
-Composite signal: [state the composite score and what it means]
-Watch for: [1 specific trigger - price level, event, or date]
-Scenario: If [X happens], expect [Y]. If [Z happens], expect [W].
+For each asset, write exactly this format:
 
-Rules:
-- Reference specific TA numbers such as RSI, MACD, Bollinger position, and ATR when available.
-- Reference the composite score, signal agreement, and market regime when available.
-- If TA and sentiment disagree, explicitly note the conflict.
-- Do NOT give buy or sell advice. Frame everything as information and scenarios.
-- Keep each asset to exactly 7 lines as shown above.
+SYMBOL $PRICE (EMOJI DIRECTION)
+[one plain-English paragraph of 4 to 6 sentences]
+
+What the paragraph must cover:
+1. What happened today in plain English
+2. Whether our signals lean bullish, bearish, or neutral, and why in simple terms
+3. What price levels matter and what to watch for next
+4. A clear if-X-then-Y scenario
+
+Critical rules:
+- Never use jargon like RSI, MACD, Bollinger bands, histogram, CAR, correlation coefficient, or composite score.
+- Never show raw analytics such as RSI 38.0, correlation 0.63, composite +0.09, or agreement percentages.
+- You still receive all of that data internally. Translate it into simple phrases like "momentum is weak", "signals are mixed", or "it is moving with the broader market".
+- Use one of these signal headers only: 🟢 Bullish, 🔴 Bearish, ⚪ Neutral.
+- Always include concrete price levels when the data provides them.
+- If the inputs conflict, say so plainly, for example: "news is supportive but the trend is still weak."
+- Do not give direct buy or sell advice. Frame everything as scenarios and what to watch.
+- Keep the tone conversational, like a smart friend explaining the market.
 - Include both stocks and crypto in the same response.
-- Do not use markdown bullets, code fences, or extra commentary."""
+- Do not use bullets, code fences, or extra commentary outside the per-asset format."""
 
 
 class DataAggregator:

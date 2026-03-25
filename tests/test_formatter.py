@@ -12,6 +12,7 @@ from src.briefing.formatter import (
     _sentiment_summary,
 )
 from src.briefing.models import BriefingData
+from src.correlation.models import MarketRegime, RegimeState
 from src.data.base import (
     AssetPrice,
     AssetType,
@@ -243,12 +244,40 @@ def test_format_daily_includes_ai_deep_dive_when_present() -> None:
 
     assert "<b>AI DEEP DIVE</b>" in text
     assert "NVDA" in text
-    assert "Verdict:</b> Bullish (72% confidence)" in text
-    assert "Bulls say:" in text
-    assert "Bears say:" in text
-    assert "Key risk:" in text
+    assert "Bullish (72%)" in text
+    assert "Bulls say:" not in text
+    assert "Bears say:" not in text
+    assert "<b>TA:</b>" not in text
+    assert "<b>Composite:</b>" not in text
+    assert "<b>Regime:</b>" not in text
+    assert "<b>Risk:</b>" in text
     assert "Watch:" in text
     assert "Pipeline: 6 LLM calls in 12.3s" in text
+
+
+def test_format_daily_simplifies_market_regime_section() -> None:
+    formatter = BriefingFormatter()
+    data = _sample_data(is_weekend=False)
+    data.regime_state = RegimeState(
+        regime=MarketRegime.RISK_OFF,
+        confidence=0.85,
+        description="Risk-off: VIX elevated, broad selloff across stocks and crypto",
+        btc_qqq_corr=0.72,
+        vix_level="high",
+        divergence_speed=-0.15,
+        implication_stocks="Defensive positioning expected",
+        implication_crypto="High contagion risk from equities",
+    )
+
+    text = formatter.format_daily(data)
+
+    assert "<b>MARKET MOOD</b>" in text
+    assert "Fearful" in text
+    assert "investors are selling across the board" in text
+    assert "Crypto is at risk of following stocks lower." in text
+    assert "confidence" not in text
+    assert "BTC-QQQ corr" not in text
+    assert "MARKET REGIME" not in text
 
 
 def test_sentiment_indicator_thresholds() -> None:

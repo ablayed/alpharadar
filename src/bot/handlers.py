@@ -13,13 +13,16 @@ from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
 from src.briefing.models import BriefingData
 from src.correlation import compute_lead_lag
+from src.correlation.models import LeadLagResult, PairCorrelation, RegimeState
 from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.events.calibration import format_remaining_drift_status
 from src.events.models import DetectedEvent
 from src.reflection.evaluator import AccuracyStats, ReflectionEvaluator
 from src.sentiment.analyzer import SentimentAnalyzer
+from src.signals.models import CompositeScore
 from src.storage.database import Database, WatchlistItem
+from src.ta.signals import TASignal
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,44 @@ COMMON_CRYPTO_MAP: dict[str, str] = {
     "DOGE": "dogecoin",
     "SHIB": "shiba-inu",
     "PEPE": "pepe",
+}
+
+REGIME_DISPLAY: dict[str, tuple[str, str, str, str, str]] = {
+    "risk_on": (
+        "\U0001F7E2",
+        "Optimistic",
+        "The market is in risk-on mode. Investors are confident and buying.",
+        "Growth stocks usually have the wind at their back if this mood holds.",
+        "Crypto often benefits too, with stronger coins usually moving fastest.",
+    ),
+    "risk_off": (
+        "\U0001F534",
+        "Fearful",
+        "The market is in risk-off mode. Investors are selling and moving to safety.",
+        "Expect continued selling pressure. Defensive sectors tend to hold up better.",
+        "Crypto is at risk of following stocks lower, and the swings can be much sharper.",
+    ),
+    "divergent": (
+        "\U0001F504",
+        "Split",
+        "Crypto and stocks are telling different stories right now.",
+        "Broad stock moves matter less when markets are this split.",
+        "Crypto may keep reacting to its own catalysts instead of equities.",
+    ),
+    "volatile": (
+        "\U0001F7E1",
+        "Chaotic",
+        "Volatility is high and direction is unclear.",
+        "Expect sharp reversals and weaker follow-through in stocks.",
+        "Crypto can overshoot in both directions when conditions are unstable.",
+    ),
+    "unknown": (
+        "\u26AA",
+        "Unclear",
+        "Signals are mixed and there is no clear market mood yet.",
+        "Stocks do not have a strong broad-market tailwind right now.",
+        "Crypto is also lacking a clean cross-asset signal.",
+    ),
 }
 
 
@@ -323,48 +364,38 @@ async def corr_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await aggregator.update_correlation_engine(persist=False)
 
         key_pairs = [
-            ("BTC", "QQQ"),
-            ("BTC", "ETH"),
-            ("ETH", "SOL"),
-            ("BTC", "SPY"),
-            ("NVDA", "AMD"),
-            ("NVDA", "BTC"),
+            ("BTC", "QQQ", "BTC & tech stocks"),
+            ("BTC", "ETH", "BTC & ETH"),
+            ("BTC", "SPY", "BTC & S&P 500"),
+            ("ETH", "SOL", "ETH & SOL"),
         ]
-        lines = ["\U0001F517 <b>CROSS-ASSET CORRELATIONS</b>", ""]
-        for sym_a, sym_b in key_pairs:
+        lines = ["\U0001F517 <b>MARKET CONNECTIONS</b>", ""]
+        for sym_a, sym_b, label in key_pairs:
             pair = aggregator.correlation_engine.get_pair_analysis(sym_a, sym_b)
             if pair is None:
                 continue
-            emoji = "\U0001F7E2" if pair.corr_20d > 0.5 else ("\U0001F534" if pair.corr_20d < -0.2 else "\u26AA")
-            lines.append(
-                f"{emoji} <b>{sym_a}-{sym_b}</b>: "
-                f"20d={pair.corr_20d:+.2f} | 60d={pair.corr_60d:+.2f} | 90d={pair.corr_90d:+.2f}"
-            )
-            lines.append(
-                f"   \u0394={pair.divergence:+.2f} | z={pair.z_score:+.1f} | {html.escape(pair.regime_signal)}"
-            )
+            lines.append(_format_correlation_pair_line(label, pair))
 
         movers = aggregator.correlation_engine.get_top_movers(3)
-        if movers:
-            lines.extend(["", "\U0001F4C8 <b>BIGGEST CORRELATION SHIFTS</b>"])
-            for mover in movers:
-                lines.append(
-                    f"{mover.symbol_a}-{mover.symbol_b}: \u0394={mover.divergence:+.2f} ({mover.regime_signal})"
-                )
+        notable = [mover for mover in movers if abs(mover.divergence) > 0.3]
+        if notable:
+            lines.extend(["", "<b>Notable shifts:</b>"])
+            for mover in notable:
+                lines.append(_format_correlation_shift_line(mover))
 
         lead_lag_pairs = context.bot_data.get("lead_lag_pairs")
-        lead_lag_text: str | None = None
+        lead_lag_result: LeadLagResult | None = None
         if isinstance(lead_lag_pairs, dict):
             qqq_btc = lead_lag_pairs.get("QQQ:BTC")
-            if qqq_btc is not None and hasattr(qqq_btc, "interpretation"):
-                lead_lag_text = str(getattr(qqq_btc, "interpretation"))
-        if lead_lag_text is None:
+            if isinstance(qqq_btc, LeadLagResult):
+                lead_lag_result = qqq_btc
+        if lead_lag_result is None:
             qqq_returns = aggregator.correlation_engine.get_returns("QQQ")
             btc_returns = aggregator.correlation_engine.get_returns("BTC")
             if qqq_returns is not None and btc_returns is not None:
-                lead_lag_text = compute_lead_lag(qqq_returns, btc_returns, "QQQ", "BTC").interpretation
-        if lead_lag_text:
-            lines.extend(["", f"<i>{html.escape(lead_lag_text, quote=False)}</i>"])
+                lead_lag_result = compute_lead_lag(qqq_returns, btc_returns, "QQQ", "BTC")
+        if lead_lag_result is not None:
+            lines.extend(["", f"\U0001F4CA {_format_lead_lag_line(lead_lag_result)}"])
 
         await msg.edit_text("\n".join(lines), parse_mode="HTML")
     except Exception as exc:
@@ -387,26 +418,7 @@ async def regime_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Regime detection not yet run.")
         return
 
-    regime_name = str(getattr(regime.regime, "value", regime.regime))
-    emoji_map = {
-        "risk_on": "\U0001F7E2",
-        "risk_off": "\U0001F534",
-        "divergent": "\U0001F504",
-        "volatile": "\U0001F7E1",
-        "unknown": "\u26AA",
-    }
-    corr_text = f"{regime.btc_qqq_corr:+.2f}" if regime.btc_qqq_corr is not None else "N/A"
-    divergence_text = f"{regime.divergence_speed:+.2f}" if regime.divergence_speed is not None else "N/A"
-    text = (
-        f"{emoji_map.get(regime_name, '\u26AA')} <b>MARKET REGIME: {html.escape(regime_name.upper())}</b>\n"
-        f"Confidence: {regime.confidence:.0%}\n\n"
-        f"{html.escape(regime.description, quote=False)}\n\n"
-        f"\U0001F4C8 <b>Stocks:</b> {html.escape(regime.implication_stocks, quote=False)}\n"
-        f"\U0001FA99 <b>Crypto:</b> {html.escape(regime.implication_crypto, quote=False)}\n\n"
-        f"BTC-QQQ corr: {corr_text}\n"
-        f"VIX: {html.escape(regime.vix_level)}\n"
-        f"Divergence speed: {divergence_text}"
-    )
+    text = _format_regime_text(regime)
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -426,23 +438,10 @@ async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"No composite data for {html.escape(symbol)}.")
         return
 
-    lines = [f"\U0001F4CA <b>SIGNAL BREAKDOWN: {html.escape(symbol)}</b>", ""]
-    for name, value in sorted(composite.signal_breakdown.items(), key=lambda item: abs(item[1]), reverse=True):
-        direction = "\U0001F4C8" if value > 0 else ("\U0001F4C9" if value < 0 else "\u26AA")
-        bar = "#" * min(20, max(0, int(abs(value) * 20)))
-        bar = bar.ljust(20, "-")
-        lines.append(f"{direction} <code>{name:<12} {value:+.3f} [{bar}]</code>")
-
-    lines.extend(
-        [
-            "",
-            f"<b>Composite:</b> {html.escape(composite.direction.replace('_', ' ').upper())} ({composite.score:+.2f})",
-            f"Agreement: {composite.agreement:.0%}",
-            "",
-            f"<i>{html.escape(composite.summary, quote=False)}</i>",
-        ]
+    await update.message.reply_text(
+        _format_signals_text(symbol, composite),
+        parse_mode="HTML",
     )
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def ta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -470,32 +469,7 @@ async def ta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
-        emoji_map = {
-            "strong_buy": "\U0001F7E2\U0001F7E2",
-            "buy": "\U0001F7E2",
-            "neutral": "\u26AA",
-            "sell": "\U0001F534",
-            "strong_sell": "\U0001F534\U0001F534",
-        }
-        text = (
-            f"\U0001F4CA <b>TECHNICAL ANALYSIS: {html.escape(signal.symbol)}</b>\n"
-            f"Price: ${signal.current_price:,.2f}\n\n"
-            f"{emoji_map.get(signal.overall_signal, '\u26AA')} <b>Signal:</b> "
-            f"{html.escape(signal.overall_signal.replace('_', ' ').upper())} "
-            f"({signal.confidence:.0%})\n\n"
-            f"<b>RSI(14):</b> {signal.rsi_value:.1f}  {html.escape(signal.rsi_signal)}\n"
-            f"<b>MACD:</b> {html.escape(signal.macd_signal.replace('_', ' '))} "
-            f"(hist: {signal.macd_histogram:+.3f})\n"
-            f"<b>Bollinger:</b> {html.escape(signal.bb_position.replace('_', ' '))} "
-            f"({'SQUEEZE' if signal.bb_squeeze else 'normal'})\n"
-            f"Upper: ${signal.bb_upper:,.2f} | Lower: ${signal.bb_lower:,.2f}\n"
-            f"<b>ATR(14):</b> ${signal.atr_value:,.2f} ({signal.atr_pct:.1f}%)  "
-            f"{html.escape(signal.volatility)} vol\n"
-            f"<b>Trend:</b> {html.escape(signal.trend.replace('_', ' '))} "
-            f"(EMA20: ${signal.ema_20:,.2f} | EMA50: ${signal.ema_50:,.2f})\n\n"
-            f"<i>{html.escape(signal.summary, quote=False)}</i>"
-        )
-        await msg.edit_text(text)
+        await msg.edit_text(_format_ta_text(signal), parse_mode="HTML")
     except Exception as exc:
         logger.exception("TA command failed for %s", symbol)
         escaped_error = html.escape(str(exc), quote=False)
@@ -962,6 +936,107 @@ def _format_playbook_message(
     return "\n\n".join(part for part in [header, body, footer] if part)
 
 
+def _format_signals_text(symbol: str, composite: CompositeScore) -> str:
+    direction_label = _signal_direction_label(composite.direction)
+    emoji = _signal_direction_emoji(composite.direction)
+    overall = f"{emoji} {direction_label}".strip()
+    lines = [f"\U0001F4CA <b>{html.escape(symbol)}</b>  Overall: {html.escape(overall)}", ""]
+
+    component_lines = [
+        _signal_component_line(name, value)
+        for name, value in sorted(
+            composite.signal_breakdown.items(),
+            key=lambda item: abs(item[1]),
+            reverse=True,
+        )
+    ]
+    lines.extend(line for line in component_lines if line)
+
+    regime_line = _signal_regime_line(composite.regime_context)
+    if regime_line:
+        lines.extend(["", regime_line])
+
+    lines.extend(["", _signal_agreement_line(composite.agreement), _signal_action_line(composite)])
+    return "\n".join(lines)
+
+
+def _format_correlation_pair_line(label: str, pair: PairCorrelation) -> str:
+    return f"{html.escape(label)}: {_correlation_relationship_text(pair)}"
+
+
+def _format_correlation_shift_line(pair: PairCorrelation) -> str:
+    if pair.divergence > 0:
+        shift = "suddenly moving together"
+    else:
+        shift = "suddenly drifting apart"
+    if pair.regime_signal == "anomalous":
+        shift += " (unusual move)"
+    return f"{html.escape(pair.symbol_a)}-{html.escape(pair.symbol_b)}: {shift}"
+
+
+def _format_lead_lag_line(result: LeadLagResult) -> str:
+    if result.peak_lag == 0:
+        return (
+            f"{html.escape(result.symbol_a)} and {html.escape(result.symbol_b)} "
+            "have been moving at roughly the same time lately."
+        )
+
+    if result.peak_lag > 0:
+        leader = result.symbol_a
+        follower = result.symbol_b
+        lag_days = result.peak_lag
+    else:
+        leader = result.symbol_b
+        follower = result.symbol_a
+        lag_days = abs(result.peak_lag)
+    return (
+        f"{html.escape(leader)} has tended to move before "
+        f"{html.escape(follower)} by about {lag_days} day(s) recently."
+    )
+
+
+def _format_regime_text(regime: RegimeState) -> str:
+    regime_name = str(getattr(regime.regime, "value", regime.regime))
+    emoji, mood, description, stocks_line, crypto_line = REGIME_DISPLAY.get(
+        regime_name,
+        REGIME_DISPLAY["unknown"],
+    )
+    duration_line = _regime_duration_line(regime_name)
+    lines = [
+        f"{emoji} <b>MARKET MOOD: {html.escape(mood)}</b>",
+        "",
+        html.escape(description, quote=False),
+        "",
+        f"\U0001F4C8 <b>Stocks:</b> {html.escape(stocks_line, quote=False)}",
+        f"\U0001FA99 <b>Crypto:</b> {html.escape(crypto_line, quote=False)}",
+    ]
+    if duration_line:
+        lines.extend(["", html.escape(duration_line, quote=False)])
+    return "\n".join(lines)
+
+
+def _format_ta_text(signal: TASignal) -> str:
+    direction_label = _signal_direction_label(signal.overall_signal)
+    emoji = _signal_direction_emoji(signal.overall_signal)
+    overall = f"{emoji} {direction_label}".strip()
+    lines = [
+        f"\U0001F4CA <b>{html.escape(signal.symbol)}</b>  {html.escape(overall)}",
+        "",
+        f"Price: {_format_price(signal.current_price)}",
+        f"Trend: {_ta_trend_text(signal)}",
+        f"Momentum: {_ta_momentum_text(signal)}",
+        f"Volatility: {_ta_volatility_text(signal)}",
+        (
+            f"Key levels: Support ~{_format_price_level(signal.bb_lower)} | "
+            f"Resistance ~{_format_price_level(signal.ema_20)}"
+        ),
+    ]
+    if signal.bb_squeeze:
+        lines.append("Setup: Volatility is compressed, so a bigger move may be close.")
+    lines.extend(["", _ta_takeaway_text(signal)])
+    return "\n".join(lines)
+
+
 def _relevant_events(data: BriefingData) -> list[DetectedEvent]:
     return [
         event
@@ -978,3 +1053,191 @@ def _symbols_without_events(data: BriefingData, events: list[DetectedEvent]) -> 
         for symbol in event.related_symbols
     }
     return [symbol for symbol in all_symbols if symbol not in event_symbols]
+
+
+def _signal_direction_emoji(direction: str) -> str:
+    return {
+        "strong_buy": "\U0001F7E2\U0001F7E2",
+        "buy": "\U0001F7E2",
+        "neutral": "",
+        "sell": "\U0001F534",
+        "strong_sell": "\U0001F534\U0001F534",
+    }.get(direction, "")
+
+
+def _signal_direction_label(direction: str) -> str:
+    return {
+        "strong_buy": "Strong Bullish",
+        "buy": "Bullish",
+        "neutral": "Neutral",
+        "sell": "Bearish",
+        "strong_sell": "Strong Bearish",
+    }.get(direction, direction.replace("_", " ").title())
+
+
+def _signal_component_line(name: str, value: float) -> str:
+    direction_key = "positive" if value > 0.02 else "negative" if value < -0.02 else "neutral"
+    descriptions = {
+        "sentiment": {
+            "positive": "\U0001F4C8 News and sentiment lean positive.",
+            "negative": "\U0001F4C9 News and sentiment lean negative.",
+            "neutral": "News and sentiment are not giving a strong push either way.",
+        },
+        "ta": {
+            "positive": "Technical trend looks constructive with improving momentum.",
+            "negative": "Technical trend is still bearish with weak momentum.",
+            "neutral": "Technical trend is mixed with no clear direction yet.",
+        },
+        "event": {
+            "positive": "The latest event has historically leaned supportive for price.",
+            "negative": "The latest event has historically leaned negative for price.",
+            "neutral": "There is no strong event signal right now.",
+        },
+        "correlation": {
+            "positive": "The broader market backdrop is helping rather than hurting.",
+            "negative": "The broader market backdrop is still a headwind.",
+            "neutral": "The broader market relationship looks fairly normal right now.",
+        },
+        "agent": {
+            "positive": "The AI debate leaned bullish overall.",
+            "negative": "The AI debate leaned bearish overall.",
+            "neutral": "The AI debate was inconclusive.",
+        },
+    }
+    return descriptions.get(name, {}).get(direction_key, "")
+
+
+def _signal_regime_line(regime_context: str) -> str:
+    regime_key = regime_context or "unknown"
+    emoji, mood, _, _, _ = REGIME_DISPLAY.get(regime_key, REGIME_DISPLAY["unknown"])
+    explanations = {
+        "risk_on": "supportive environment for risk assets",
+        "risk_off": "defensive environment",
+        "divergent": "stocks and crypto are not aligned",
+        "volatile": "fast swings and weaker follow-through",
+        "unknown": "mixed backdrop",
+        "default": "mixed backdrop",
+    }
+    return (
+        f"Market mood: {emoji} {html.escape(mood)}"
+        f" - {html.escape(explanations.get(regime_key, 'mixed backdrop'), quote=False)}"
+    )
+
+
+def _signal_agreement_line(agreement: float) -> str:
+    if agreement >= 0.8:
+        return "Most signals are aligned, so conviction is relatively strong."
+    if agreement >= 0.6:
+        return "Most signals point the same way, but conviction is only moderate."
+    return "Signals are split 50/50, so there is no strong conviction either way."
+
+
+def _signal_action_line(composite: CompositeScore) -> str:
+    if composite.direction == "neutral" or composite.agreement < 0.6:
+        return "Wait for clearer direction before acting."
+    if composite.direction in {"buy", "strong_buy"}:
+        return "Bias is positive, but it is still better to wait for follow-through than chase it."
+    return "Bias is negative, so treat bounces cautiously until the picture improves."
+
+
+def _correlation_relationship_text(pair: PairCorrelation) -> str:
+    corr = pair.corr_20d
+    if corr < -0.3:
+        description = "moving in opposite directions"
+    elif abs(corr) > 0.8:
+        description = "tightly linked - they usually move together"
+    elif abs(corr) > 0.5:
+        description = "moderately connected"
+    elif abs(corr) > 0.2:
+        description = "loosely connected"
+    else:
+        description = "moving independently right now"
+
+    if pair.regime_signal == "coupling":
+        description += " (connection strengthening)"
+    elif pair.regime_signal == "decoupling":
+        description += " (connection weakening)"
+    elif pair.regime_signal == "anomalous":
+        description += " (unusual shift)"
+    return description
+
+
+def _regime_duration_line(regime_name: str) -> str:
+    if regime_name == "risk_off":
+        return "This mood can last from several days to a few weeks. Watch for volatility to cool before getting aggressive."
+    if regime_name == "risk_on":
+        return "As long as volatility stays calm, dips are more likely to get bought than sold."
+    if regime_name == "volatile":
+        return "Conditions like this can reverse quickly, so smaller risk and more patience usually make sense."
+    if regime_name == "divergent":
+        return "Wait for stocks and crypto to confirm each other before trusting broad market signals too much."
+    return "Wait for a cleaner trend before leaning too heavily in one direction."
+
+
+def _ta_trend_text(signal: TASignal) -> str:
+    return {
+        "strong_up": "Strong uptrend - price is above both key moving averages.",
+        "up": "Uptrend - price is above the short-term trend line.",
+        "neutral": "Sideways - there is no clean trend right now.",
+        "down": "Downtrend - price is below the short-term trend line.",
+        "strong_down": "Downtrend - price is below both key moving averages.",
+    }.get(signal.trend, "Trend is unclear right now.")
+
+
+def _ta_momentum_text(signal: TASignal) -> str:
+    if signal.rsi_value < 30:
+        return "Oversold - it may be due for a bounce."
+    if signal.rsi_value > 70:
+        return "Overbought - it may be due for a pullback."
+    if signal.macd_signal == "bullish_cross":
+        return "Starting to recover, but the turn is not fully confirmed yet."
+    if signal.macd_signal == "bearish_cross":
+        return "Momentum is rolling over and the downside pressure is building."
+    if signal.macd_signal == "bullish":
+        return "Momentum is positive, but it is not accelerating strongly."
+    return "Momentum is still weak or flat."
+
+
+def _ta_volatility_text(signal: TASignal) -> str:
+    return {
+        "low": "Low - moves have been relatively calm, which can precede a breakout.",
+        "normal": "Normal - price swings are in a typical range.",
+        "high": "High - expect larger swings in either direction.",
+    }.get(signal.volatility, "Volatility is unclear.")
+
+
+def _ta_takeaway_text(signal: TASignal) -> str:
+    resistance = _format_price_level(signal.ema_20)
+    if signal.overall_signal == "neutral" and signal.trend in {"down", "strong_down"} and signal.macd_signal in {"bullish", "bullish_cross"}:
+        return (
+            "Overall the technical picture is mixed. The downtrend is still in place, "
+            f"but momentum is starting to improve. Wait for confirmation above {resistance}."
+        )
+    if signal.overall_signal in {"buy", "strong_buy"}:
+        return (
+            "Overall the technical picture is constructive. Trend and momentum are leaning positive, "
+            f"but holding above {resistance} would strengthen the case."
+        )
+    if signal.overall_signal in {"sell", "strong_sell"}:
+        return (
+            "Overall the technical picture is weak. Trend and momentum both lean lower, "
+            f"so a move back above {resistance} is the first sign conditions are improving."
+        )
+    return (
+        "Overall the technical picture is mixed, with no strong edge either way yet. "
+        f"Wait for a cleaner move above or below {resistance} before assuming a trend."
+    )
+
+
+def _format_price(value: float) -> str:
+    if value >= 1_000:
+        return f"${value:,.0f}"
+    if value >= 1:
+        return f"${value:,.2f}"
+    return f"${value:.4g}"
+
+
+def _format_price_level(value: float) -> str:
+    if value >= 1:
+        return f"${value:,.0f}"
+    return f"${value:.4g}"

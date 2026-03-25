@@ -539,6 +539,83 @@ class BriefingFormatter:
             selection_suffix = f" (selected: {self._escape(verdict.selection_reason)})"
         return f"📊 <b>{self._escape(verdict.display_name)}</b>{selection_suffix}"
 
+    def _format_market_regime(self, data: BriefingData) -> str:
+        regime_state = data.regime_state
+        if regime_state is None or regime_state.regime.value == "unknown":
+            return ""
+
+        mood_map = {
+            "risk_on": (
+                "🟢",
+                "Optimistic",
+                "investors are buying and taking more risk",
+                "Stocks and crypto usually respond better when this mood holds.",
+            ),
+            "risk_off": (
+                "🔴",
+                "Fearful",
+                "investors are selling across the board",
+                "Crypto is at risk of following stocks lower.",
+            ),
+            "divergent": (
+                "🔄",
+                "Split",
+                "stocks and crypto are not moving in sync",
+                "Cross-market signals matter less until they confirm each other.",
+            ),
+            "volatile": (
+                "🟡",
+                "Chaotic",
+                "price swings are fast and conviction is weak",
+                "Expect sharper reversals and weaker follow-through.",
+            ),
+        }
+        emoji, mood, description, implication = mood_map.get(
+            regime_state.regime.value,
+            ("⚪", "Unclear", "signals are mixed", "Wait for a cleaner trend before leaning too hard."),
+        )
+        lines = [
+            "🔗 <b>MARKET MOOD</b>",
+            f"{emoji} <b>{self._escape(mood)}</b> - {self._escape(description)}",
+            self._escape(implication),
+        ]
+        return "\n".join(lines)
+
+    def _format_ai_deep_dive(self, analysis: AgentAnalysis | None) -> str:
+        if analysis is None or not analysis.debate_verdicts:
+            return ""
+
+        lines = ["🤖 <b>AI DEEP DIVE</b>"]
+        for verdict in analysis.debate_verdicts[:2]:
+            lines.append("\n".join(self._format_briefing_verdict(verdict)))
+
+        lines.append(
+            f"<i>🧠 Pipeline: {analysis.total_llm_calls} LLM calls in "
+            f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>"
+        )
+        return "\n\n".join(line for line in lines if line)
+
+    def _format_briefing_verdict(self, verdict: DebateVerdict) -> list[str]:
+        summary = self._sanitize_ai_text(verdict.summary, 420)
+        risk = self._sanitize_ai_text(verdict.key_risk, 220)
+        watch = self._sanitize_ai_text(verdict.action_context, 220)
+        emoji = {
+            "bullish": "📈",
+            "bearish": "📉",
+            "neutral": "⚖️",
+        }.get(verdict.prevailing_view, "⚖️")
+
+        lines = [
+            f"📊 <b>{self._escape(verdict.display_name)}</b>  {emoji} {verdict.prevailing_view.title()} ({verdict.confidence:.0%})",
+        ]
+        if summary:
+            lines.extend(["", summary])
+        if risk:
+            lines.extend(["", f"⚠️ <b>Risk:</b> {risk}"])
+        if watch:
+            lines.append(f"👁 <b>Watch:</b> {watch}")
+        return lines
+
     def _sanitize_ai_text(self, value: str, limit: int | None) -> str:
         collapsed = " ".join(value.split())
         escaped = self._escape(collapsed)
