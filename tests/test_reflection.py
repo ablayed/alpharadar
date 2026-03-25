@@ -58,6 +58,31 @@ async def test_prediction_tracker_logs_and_records_outcomes(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prediction_tracker_normalizes_trade_direction_and_source(db) -> None:
+    tracker = PredictionTracker(db.db_path)
+    prediction_id = await tracker.log_prediction(
+        symbol="BTC",
+        asset_type="crypto",
+        predicted_direction="long",
+        confidence=0.71,
+        price_at_prediction=50_000.0,
+        source="Trade",
+        reasoning="Test trade setup.",
+    )
+
+    async with aiosqlite.connect(db.db_path) as connection:
+        cursor = await connection.execute(
+            "SELECT predicted_direction, source FROM predictions WHERE id = ?",
+            (prediction_id,),
+        )
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert row[0] == "bullish"
+    assert row[1] == "trade"
+
+
+@pytest.mark.asyncio
 async def test_reflection_evaluator_reads_accuracy_and_latest_reflection(db) -> None:
     async with aiosqlite.connect(db.db_path) as connection:
         await connection.execute(

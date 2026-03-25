@@ -79,6 +79,7 @@ Critical rules:
 - Never show raw analytics such as RSI 38.0, correlation 0.63, composite +0.09, or agreement percentages.
 - You still receive all of that data internally. Translate it into simple phrases like "momentum is weak", "signals are mixed", or "it is moving with the broader market".
 - Use one of these signal headers only: 🟢 Bullish, 🔴 Bearish, ⚪ Neutral.
+- The direction in the header must match the provided consensus bias exactly.
 - Always include concrete price levels when the data provides them.
 - If the inputs conflict, say so plainly, for example: "news is supportive but the trend is still weak."
 - Do not give direct buy or sell advice. Frame everything as scenarios and what to watch.
@@ -472,6 +473,27 @@ class DataAggregator:
             composite_scores[symbol] = compute_composite(symbol, inputs, regime=regime_key)
         return composite_scores
 
+    def apply_agent_analysis(
+        self,
+        briefing_data: BriefingData,
+        agent_analysis: AgentAnalysis | None,
+    ) -> BriefingData:
+        briefing_data.agent_analysis = agent_analysis
+        if agent_analysis is None:
+            return briefing_data
+
+        briefing_data.composite_scores = self._compute_composite_scores(
+            stock_prices=briefing_data.stock_prices,
+            crypto_prices=briefing_data.crypto_prices,
+            news_items=briefing_data.news_items,
+            event_data=briefing_data.event_data,
+            ta_signals=briefing_data.ta_signals,
+            correlation_pairs=briefing_data.correlation_pairs,
+            regime_state=briefing_data.regime_state,
+            agent_analysis=agent_analysis,
+        )
+        return briefing_data
+
     def _build_signal_inputs(
         self,
         *,
@@ -858,19 +880,10 @@ class DataAggregator:
         )
 
         if include_agent_analysis:
-            briefing_data.agent_analysis = await self.run_agent_analysis(briefing_data)
-            if briefing_data.agent_analysis is not None:
+            analysis = await self.run_agent_analysis(briefing_data)
+            if analysis is not None:
                 try:
-                    briefing_data.composite_scores = self._compute_composite_scores(
-                        stock_prices=stock_prices,
-                        crypto_prices=crypto_prices,
-                        news_items=news_items,
-                        event_data=event_data,
-                        ta_signals=briefing_data.ta_signals,
-                        correlation_pairs=briefing_data.correlation_pairs,
-                        regime_state=briefing_data.regime_state,
-                        agent_analysis=briefing_data.agent_analysis,
-                    )
+                    briefing_data = self.apply_agent_analysis(briefing_data, analysis)
                 except Exception:
                     logger.exception("Failed to recompute composite scores with agent context")
 
@@ -1079,6 +1092,8 @@ class DataAggregator:
                     [
                         f"{asset['symbol']} ({asset['asset_type']}):",
                         f"  Price: {asset['price_text']}",
+                        f"  Consensus bias: {asset['consensus_bias']}",
+                        f"  Agent verdict: {asset['agent_view']} ({asset['agent_confidence_text']})",
                         f"  24h change: {asset['change_24h_pct']:+.1f}%",
                         f"  7d change: {asset['change_7d_text']}",
                         f"  Sentiment: {asset['sentiment_label']} ({asset['sentiment_score_text']})",
@@ -1138,11 +1153,22 @@ class DataAggregator:
                 if existing is None or event.confidence > existing.confidence:
                     strongest_event_by_symbol[symbol.upper()] = event
 
+        verdicts = {
+            verdict.symbol.upper(): verdict
+            for verdict in (
+                briefing_data.agent_analysis.debate_verdicts
+                if briefing_data.agent_analysis is not None
+                else []
+            )
+        }
+
         notable_assets: list[dict[str, object]] = []
         for price in [*briefing_data.stock_prices, *briefing_data.crypto_prices]:
             symbol_upper = price.symbol.upper()
             news_item = latest_news_by_symbol.get(symbol_upper)
             event = strongest_event_by_symbol.get(symbol_upper)
+            verdict = verdicts.get(symbol_upper)
+            composite = briefing_data.composite_scores.get(symbol_upper)
             has_event = event is not None
             if price.asset_type == AssetType.STOCK:
                 is_notable = abs(price.change_24h_pct) > 1.0 or has_event
@@ -1167,6 +1193,13 @@ class DataAggregator:
                     "expected_car_window": event.expected_car_window if event and event.expected_car_window else "N/A",
                     "remaining_drift_text": self._playbook_pct_text(event.remaining_drift_pct if event is not None else None),
                     "headline": news_item.headline if news_item is not None else "N/A",
+                    "consensus_bias": self._playbook_bias_label(composite.direction if composite is not None else "neutral"),
+                    "agent_view": verdict.prevailing_view if verdict is not None else "N/A",
+                    "agent_confidence_text": (
+                        f"{verdict.confidence:.0%}"
+                        if verdict is not None
+                        else "N/A"
+                    ),
                     "rsi_value_text": self._playbook_number_text(
                         briefing_data.ta_signals.get(symbol_upper).rsi_value
                         if symbol_upper in briefing_data.ta_signals
@@ -1324,6 +1357,14 @@ class DataAggregator:
         if price.current_price >= 1:
             return f"${price.current_price:,.2f}"
         return f"${price.current_price:.4g}"
+
+    @staticmethod
+    def _playbook_bias_label(direction: str) -> str:
+        if direction in {"strong_buy", "buy"}:
+            return "Bullish"
+        if direction in {"strong_sell", "sell"}:
+            return "Bearish"
+        return "Neutral"
 
     async def _ensure_agent_pipeline(self) -> AgentPipeline | None:
         if self.settings.gemini_api_key is None:

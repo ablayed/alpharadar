@@ -9,12 +9,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.alerts import AlertPipeline, AlertSeverity
+from src.agents.state import AgentAnalysis, DebateVerdict
 from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
 from src.briefing.models import BriefingData
 from src.correlation import compute_lead_lag
 from src.correlation.models import LeadLagResult, PairCorrelation, RegimeState
 from src.config import settings
+from src.data.base import AssetPrice
 from src.data.aggregator import DataAggregator
 from src.events.calibration import format_remaining_drift_status
 from src.events.models import DetectedEvent
@@ -23,6 +25,7 @@ from src.sentiment.analyzer import SentimentAnalyzer
 from src.signals.models import CompositeScore
 from src.storage.database import Database, WatchlistItem
 from src.ta.signals import TASignal
+from src.trade import TradeSignal, generate_trade_signal
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +125,8 @@ def _help_text() -> str:
         "/corr  Show cross-asset correlation shifts\n"
         "/regime  Show the current market regime\n"
         "/signals NVDA  Show the full signal stack for one symbol\n"
+        "/trade NVDA  Generate a structured trade setup for one symbol\n"
+        "/trades  Scan the watchlist for active trade setups\n"
         "/ta NVDA  Compute local technical analysis for one symbol\n"
         "/alerts  Show real-time alert pipeline status\n"
         "/accuracy  Show prediction accuracy and calibration buckets\n"
@@ -279,7 +284,7 @@ async def playbook_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     aggregator = _aggregator_from_context(context)
 
     try:
-        data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+        data = await _latest_briefing_data(context, include_agent_analysis=True)
         _store_latest_briefing(context, data)
         playbook_text, llm_calls, duration = await aggregator.generate_playbook(data)
         message = _format_playbook_message(
@@ -432,7 +437,7 @@ async def signals_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     symbol = context.args[0].strip().upper()
-    data = await _latest_briefing_data(context)
+    data = await _latest_briefing_data(context, include_agent_analysis=True)
     composite = data.composite_scores.get(symbol)
     if composite is None:
         await update.message.reply_text(f"No composite data for {html.escape(symbol)}.")
@@ -474,6 +479,157 @@ async def ta_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         logger.exception("TA command failed for %s", symbol)
         escaped_error = html.escape(str(exc), quote=False)
         await msg.edit_text(f"\u26A0\uFE0F TA failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /trade &lt;symbol&gt;")
+        return
+
+    symbol = context.args[0].strip().upper()
+    if not symbol:
+        await update.message.reply_text("Usage: /trade &lt;symbol&gt;")
+        return
+
+    msg = await update.message.reply_text(f"\U0001F3AF Generating trade signal for {html.escape(symbol)}...")
+    aggregator = _aggregator_from_context(context)
+
+    try:
+        data = await _latest_briefing_data(context)
+        price_item = _price_item_for_symbol(data, symbol)
+        if price_item is None:
+            await msg.edit_text(f"\u26A0\uFE0F Could not find price data for {html.escape(symbol)}.")
+            return
+
+        ta_signal = data.ta_signals.get(symbol)
+        if ta_signal is None:
+            ta_signal = await aggregator.get_ta_signal(symbol)
+            if ta_signal is not None:
+                data.ta_signals[symbol] = ta_signal
+
+        verdict = _verdict_for_symbol(data.agent_analysis, symbol)
+        if verdict is None:
+            forced_analysis = await aggregator.run_agent_analysis(data, forced_symbols=[symbol], source="trade")
+            if forced_analysis is not None:
+                merged_analysis = _merge_agent_analysis(data.agent_analysis, forced_analysis)
+                data = aggregator.apply_agent_analysis(data, merged_analysis)
+                _store_latest_briefing(context, data)
+                verdict = _verdict_for_symbol(data.agent_analysis, symbol)
+
+        composite = data.composite_scores.get(symbol)
+        regime_key = (
+            data.regime_state.regime.value
+            if data.regime_state is not None
+            else "default"
+        )
+        signal = generate_trade_signal(
+            symbol=symbol,
+            current_price=price_item.current_price,
+            ta_signal=ta_signal,
+            composite=composite,
+            verdict=verdict,
+            event_data=_event_payload(_event_for_symbol(data, symbol)),
+            regime=regime_key,
+        )
+
+        if signal is None:
+            await msg.edit_text(_format_no_trade_text(symbol), parse_mode="HTML")
+            return
+
+        await msg.edit_text(_format_trade_text(signal), parse_mode="HTML")
+        await aggregator.tracker.log_prediction(
+            symbol=symbol,
+            asset_type=price_item.asset_type.value,
+            predicted_direction=_trade_direction_to_prediction(signal.direction),
+            confidence=signal.confidence,
+            price_at_prediction=price_item.current_price,
+            source="trade",
+            reasoning=signal.reasoning,
+            event_type=_event_type_for_symbol(data, symbol),
+            predicted_target=signal.tp2,
+        )
+    except Exception as exc:
+        logger.exception("Trade command failed for %s", symbol)
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Trade signal failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    msg = await update.message.reply_text("\U0001F3AF Scanning all assets for trade setups...")
+    aggregator = _aggregator_from_context(context)
+
+    try:
+        data = await _latest_briefing_data(context, include_agent_analysis=True)
+        signals: list[tuple[TradeSignal, AssetPrice]] = []
+        regime_key = (
+            data.regime_state.regime.value
+            if data.regime_state is not None
+            else "default"
+        )
+        for price_item in [*data.stock_prices, *data.crypto_prices]:
+            symbol = price_item.symbol.upper()
+            signal = generate_trade_signal(
+                symbol=symbol,
+                current_price=price_item.current_price,
+                ta_signal=data.ta_signals.get(symbol),
+                composite=data.composite_scores.get(symbol),
+                verdict=_verdict_for_symbol(data.agent_analysis, symbol),
+                event_data=_event_payload(_event_for_symbol(data, symbol)),
+                regime=regime_key,
+            )
+            if signal is None:
+                continue
+            signals.append((signal, price_item))
+
+        if not signals:
+            await msg.edit_text(
+                "No actionable trade setups found right now.\n\nSignals are too weak or too conflicting."
+            )
+            return
+
+        signals.sort(key=lambda item: item[0].confidence, reverse=True)
+        lines = ["\U0001F3AF <b>ACTIVE TRADE SIGNALS</b>", ""]
+        for signal, price_item in signals[:10]:
+            direction_emoji = "\U0001F7E2" if signal.direction == "LONG" else "\U0001F534"
+            lines.append(
+                f"{direction_emoji} <b>{html.escape(signal.symbol)}</b> "
+                f"{html.escape(signal.direction)} ({signal.confidence:.0%})"
+            )
+            lines.append(
+                f"   Entry: {_format_trade_price(signal.entry_low)}-"
+                f"{_format_trade_price(signal.entry_high)} | "
+                f"SL: {_format_trade_price(signal.stop_loss)} | "
+                f"TP2: {_format_trade_price(signal.tp2)}"
+            )
+            lines.append(f"   R:R 1:{signal.risk_reward} | {html.escape(signal.timeframe)}")
+            lines.append("")
+            await aggregator.tracker.log_prediction(
+                symbol=signal.symbol,
+                asset_type=price_item.asset_type.value,
+                predicted_direction=_trade_direction_to_prediction(signal.direction),
+                confidence=signal.confidence,
+                price_at_prediction=price_item.current_price,
+                source="trade",
+                reasoning=signal.reasoning,
+                event_type=_event_type_for_symbol(data, signal.symbol),
+                predicted_target=signal.tp2,
+            )
+
+        lines.append("Not financial advice. Use /trade &lt;symbol&gt; for full details.")
+        await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    except Exception as exc:
+        logger.exception("Trades command failed")
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Trade scan failed.\n<i>{escaped_error[:250]}</i>")
 
 
 async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -532,7 +688,7 @@ async def accuracy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"<b>Last 7 days:</b> {fmt(snapshot['last_7d'])}\n\n"
         f"<b>High confidence (70%+):</b> {fmt(snapshot['high_confidence'])}\n"
         f"<b>Low confidence (&lt;70%):</b> {fmt(snapshot['low_confidence'])}\n\n"
-        "<i>Predictions logged from briefings, /analyze, and /playbook</i>"
+        "<i>Predictions logged from briefings, /analyze, /playbook, and trade signals</i>"
     )
     await update.message.reply_text(text)
 
@@ -898,13 +1054,19 @@ def _reflection_evaluator_from_context(context: ContextTypes.DEFAULT_TYPE) -> Re
     return aggregator.reflection_evaluator
 
 
-async def _latest_briefing_data(context: ContextTypes.DEFAULT_TYPE) -> BriefingData:
+async def _latest_briefing_data(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    include_agent_analysis: bool = False,
+) -> BriefingData:
     cached = context.bot_data.get("latest_briefing_data")
-    if isinstance(cached, BriefingData):
+    if isinstance(cached, BriefingData) and (
+        not include_agent_analysis or cached.agent_analysis is not None
+    ):
         return cached
 
     aggregator = _aggregator_from_context(context)
-    data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+    data = await aggregator.gather_briefing_data(include_agent_analysis=include_agent_analysis)
     _store_latest_briefing(context, data)
     return data
 
@@ -914,6 +1076,8 @@ def _store_latest_briefing(context: ContextTypes.DEFAULT_TYPE, data: BriefingDat
     context.bot_data["current_regime"] = data.regime_state
     context.bot_data["composite_scores"] = data.composite_scores
     context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
+    context.bot_data["ta_signals"] = data.ta_signals
+    context.bot_data["agent_analysis"] = data.agent_analysis
 
 
 def _format_playbook_message(
@@ -934,6 +1098,38 @@ def _format_playbook_message(
         label = "call" if llm_calls == 1 else "calls"
         footer = f"<i>\U0001F9E0 {llm_calls} LLM {label} in {duration:.1f}s</i>"
     return "\n\n".join(part for part in [header, body, footer] if part)
+
+
+def _format_trade_text(signal: TradeSignal) -> str:
+    direction_emoji = "\U0001F7E2" if signal.direction == "LONG" else "\U0001F534"
+    reasoning = html.escape(signal.reasoning, quote=False)
+    manipulation = html.escape(signal.manipulation_check, quote=False)
+    return (
+        f"\U0001F3AF <b>TRADE SIGNAL: {html.escape(signal.symbol)}</b>\n\n"
+        f"Direction: {direction_emoji} <b>{html.escape(signal.direction)}</b>\n"
+        f"Confidence: {signal.confidence:.0%}\n\n"
+        f"<b>Entry zone:</b> {_format_trade_price(signal.entry_low)} - {_format_trade_price(signal.entry_high)}\n"
+        f"<b>Stop loss:</b> {_format_trade_price(signal.stop_loss)} (-{signal.stop_loss_pct:.1f}%)\n"
+        f"<b>Risk:</b> {_format_trade_price(signal.risk_per_unit)} per unit\n\n"
+        f"<b>Take profit targets:</b>\n"
+        f"TP1: {_format_trade_price(signal.tp1)} (+{signal.tp1_pct:.1f}%)  conservative\n"
+        f"TP2: {_format_trade_price(signal.tp2)} (+{signal.tp2_pct:.1f}%)  moderate\n"
+        f"TP3: {_format_trade_price(signal.tp3)} (+{signal.tp3_pct:.1f}%)  aggressive\n\n"
+        f"<b>Risk/Reward:</b> 1:{signal.risk_reward} (to TP2)\n"
+        f"<b>Timeframe:</b> {html.escape(signal.timeframe)}\n\n"
+        f"<i>{reasoning}</i>\n\n"
+        f"{manipulation}\n\n"
+        "<b>NOT financial advice.</b> Every trade carries risk of total loss. "
+        "Never risk more than 2% of your portfolio on a single trade."
+    )
+
+
+def _format_no_trade_text(symbol: str) -> str:
+    return (
+        f"\u26A0\uFE0F <b>NO TRADE - {html.escape(symbol)}</b>\n\n"
+        "Signals are too weak or too conflicting to produce a reliable setup.\n"
+        "Wait for clearer conditions."
+    )
 
 
 def _format_signals_text(symbol: str, composite: CompositeScore) -> str:
@@ -1035,6 +1231,81 @@ def _format_ta_text(signal: TASignal) -> str:
         lines.append("Setup: Volatility is compressed, so a bigger move may be close.")
     lines.extend(["", _ta_takeaway_text(signal)])
     return "\n".join(lines)
+
+
+def _price_item_for_symbol(data: BriefingData, symbol: str) -> AssetPrice | None:
+    symbol_upper = symbol.upper()
+    for item in [*data.stock_prices, *data.crypto_prices]:
+        if item.symbol.upper() == symbol_upper:
+            return item
+    return None
+
+
+def _event_for_symbol(data: BriefingData, symbol: str) -> DetectedEvent | None:
+    symbol_upper = symbol.upper()
+    best_event: DetectedEvent | None = None
+    best_score = -1.0
+    for event in data.event_data:
+        if symbol_upper not in {related.upper() for related in event.related_symbols}:
+            continue
+        score = abs(event.remaining_drift_pct or event.expected_car_pct or 0.0) * event.confidence
+        if score > best_score:
+            best_event = event
+            best_score = score
+    return best_event
+
+
+def _event_payload(event: DetectedEvent | None) -> dict[str, object] | None:
+    if event is None:
+        return None
+    return {
+        "event_type": event.event_type.value,
+        "remaining_drift_pct": event.remaining_drift_pct,
+        "expected_car_pct": event.expected_car_pct,
+    }
+
+
+def _event_type_for_symbol(data: BriefingData, symbol: str) -> str | None:
+    event = _event_for_symbol(data, symbol)
+    if event is None:
+        return None
+    return event.event_type.value
+
+
+def _verdict_for_symbol(analysis: AgentAnalysis | None, symbol: str) -> DebateVerdict | None:
+    if analysis is None:
+        return None
+    symbol_upper = symbol.upper()
+    for verdict in analysis.debate_verdicts:
+        if verdict.symbol.upper() == symbol_upper:
+            return verdict
+    return None
+
+
+def _merge_agent_analysis(
+    existing: AgentAnalysis | None,
+    incoming: AgentAnalysis | None,
+) -> AgentAnalysis | None:
+    if incoming is None:
+        return existing
+    if existing is None:
+        return incoming
+
+    verdicts: dict[str, DebateVerdict] = {
+        verdict.symbol.upper(): verdict
+        for verdict in existing.debate_verdicts
+    }
+    for verdict in incoming.debate_verdicts:
+        verdicts[verdict.symbol.upper()] = verdict
+
+    return AgentAnalysis(
+        analyst_reports=[*existing.analyst_reports, *incoming.analyst_reports],
+        debate_verdicts=list(verdicts.values()),
+        total_llm_calls=existing.total_llm_calls + incoming.total_llm_calls,
+        pipeline_duration_seconds=(
+            existing.pipeline_duration_seconds + incoming.pipeline_duration_seconds
+        ),
+    )
 
 
 def _relevant_events(data: BriefingData) -> list[DetectedEvent]:
@@ -1241,3 +1512,15 @@ def _format_price_level(value: float) -> str:
     if value >= 1:
         return f"${value:,.0f}"
     return f"${value:.4g}"
+
+
+def _format_trade_price(value: float) -> str:
+    if value >= 100:
+        return f"${value:,.2f}"
+    if value >= 1:
+        return f"${value:.2f}"
+    return f"${value:.4f}"
+
+
+def _trade_direction_to_prediction(direction: str) -> str:
+    return "bullish" if direction.upper() == "LONG" else "bearish"

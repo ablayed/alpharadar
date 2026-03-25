@@ -38,6 +38,8 @@ from src.bot.handlers import (
     start_command,
     status_command,
     ta_command,
+    trade_command,
+    trades_command,
     watchlist_command,
 )
 from src.bot.scheduler import setup_scheduler
@@ -213,6 +215,8 @@ def main() -> None:
     application.add_handler(CommandHandler("corr", corr_command))
     application.add_handler(CommandHandler("regime", regime_command))
     application.add_handler(CommandHandler("signals", signals_command))
+    application.add_handler(CommandHandler("trade", trade_command))
+    application.add_handler(CommandHandler("trades", trades_command))
     application.add_handler(CommandHandler("ta", ta_command))
     application.add_handler(CommandHandler("alerts", alerts_command))
     application.add_handler(CommandHandler("accuracy", accuracy_command))

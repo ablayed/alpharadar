@@ -27,6 +27,8 @@ class PredictionTracker:
         event_type: str | None = None,
         predicted_target: float | None = None,
     ) -> int:
+        normalized_direction = _normalize_prediction_direction(predicted_direction)
+        normalized_source = source.strip().lower()
         async with aiosqlite.connect(self._db_path) as connection:
             cursor = await connection.execute(
                 """
@@ -39,11 +41,11 @@ class PredictionTracker:
                     symbol.upper(),
                     asset_type,
                     event_type,
-                    predicted_direction,
+                    normalized_direction,
                     predicted_target,
                     confidence,
                     reasoning,
-                    source,
+                    normalized_source,
                     price_at_prediction,
                 ),
             )
@@ -147,6 +149,20 @@ def _direction_from_change(change_pct: float, *, neutral_band: float) -> str:
     if change_pct < -neutral_band:
         return "bearish"
     return "neutral"
+
+
+def _normalize_prediction_direction(value: str) -> str:
+    normalized = value.strip().lower()
+    mapping = {
+        "long": "bullish",
+        "buy": "bullish",
+        "bullish": "bullish",
+        "short": "bearish",
+        "sell": "bearish",
+        "bearish": "bearish",
+        "neutral": "neutral",
+    }
+    return mapping.get(normalized, "neutral")
 
 
 def _sqlite_timestamp(value: datetime) -> str:
