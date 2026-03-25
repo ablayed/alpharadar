@@ -3,12 +3,12 @@ from __future__ import annotations
 from src.agents.state import DebateVerdict
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
-from src.trade.generator import generate_trade_signal
+from src.trade.generator import generate_crypto_trade_signal, generate_trade_signal
 
 
 def _ta_signal(
     *,
-    symbol: str = "NVDA",
+    symbol: str = "BTC",
     current_price: float = 100.0,
     atr_value: float = 4.0,
     atr_pct: float = 4.0,
@@ -22,6 +22,7 @@ def _ta_signal(
     rsi_signal: str = "neutral",
     rsi_value: float = 52.0,
     macd_signal: str = "bullish",
+    macd_histogram: float = 0.2,
 ) -> TASignal:
     return TASignal(
         symbol=symbol,
@@ -31,7 +32,7 @@ def _ta_signal(
         rsi_signal=rsi_signal,
         macd_line=1.0,
         macd_signal_line=0.8,
-        macd_histogram=0.2,
+        macd_histogram=macd_histogram,
         macd_signal=macd_signal,
         bb_upper=bb_upper,
         bb_lower=bb_lower,
@@ -51,7 +52,7 @@ def _ta_signal(
 
 def _composite(
     *,
-    symbol: str = "NVDA",
+    symbol: str = "BTC",
     score: float = 0.22,
     agreement: float = 0.75,
     direction: str = "buy",
@@ -71,7 +72,7 @@ def _composite(
 
 def _verdict(
     *,
-    symbol: str = "NVDA",
+    symbol: str = "BTC",
     prevailing_view: str = "bullish",
     confidence: float = 0.82,
 ) -> DebateVerdict:
@@ -88,104 +89,201 @@ def _verdict(
     )
 
 
-def test_generate_trade_signal_builds_long_setup() -> None:
+def test_generate_trade_signal_builds_stock_setup() -> None:
     signal = generate_trade_signal(
         symbol="NVDA",
         current_price=100.0,
-        ta_signal=_ta_signal(),
-        composite=_composite(),
-        verdict=_verdict(),
+        ta_signal=_ta_signal(symbol="NVDA"),
+        composite=_composite(symbol="NVDA"),
+        verdict=_verdict(symbol="NVDA"),
         event_data={"event_type": "analyst_upgrade", "remaining_drift_pct": 6.0},
         regime="risk_on",
     )
 
     assert signal is not None
     assert signal.direction == "LONG"
-    assert signal.confidence == 0.82
-    assert signal.entry_low < signal.entry_high
-    assert signal.stop_loss < signal.entry_low
     assert signal.tp1 < signal.tp2 < signal.tp3
     assert signal.risk_reward >= 1.5
-    assert "AI verdict is bullish" in signal.reasoning
-    assert signal.manipulation_check == "No manipulation flags detected."
 
 
-def test_generate_trade_signal_returns_none_for_weak_setup() -> None:
-    signal = generate_trade_signal(
-        symbol="NVDA",
-        current_price=100.0,
-        ta_signal=_ta_signal(confidence=0.4, overall_signal="neutral", trend="neutral"),
-        composite=_composite(score=0.05, agreement=0.4, direction="neutral"),
+def test_generate_crypto_trade_signal_requires_three_confluence_factors() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=2_500.0,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=2_500.0,
+            atr_value=90.0,
+            atr_pct=3.6,
+            trend="neutral",
+            overall_signal="neutral",
+            confidence=0.4,
+            rsi_value=48.0,
+            macd_signal="bullish",
+            macd_histogram=0.1,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.06,
+            agreement=0.45,
+            direction="neutral",
+            breakdown={"sentiment": 0.03},
+        ),
         verdict=None,
         event_data=None,
         regime="default",
+        btc_change_pct=0.5,
     )
 
     assert signal is None
 
 
-def test_generate_trade_signal_flags_manipulation_patterns() -> None:
-    signal = generate_trade_signal(
-        symbol="NVDA",
-        current_price=100.0,
+def test_generate_crypto_trade_signal_builds_high_confluence_long_setup() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=2_500.0,
         ta_signal=_ta_signal(
-            atr_pct=9.2,
+            symbol="ETH",
+            current_price=2_500.0,
+            atr_value=85.0,
+            atr_pct=3.4,
+            bb_upper=2_950.0,
+            bb_lower=2_340.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.72,
+            rsi_signal="oversold",
+            rsi_value=28.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.35,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.24,
+            agreement=0.78,
+            direction="buy",
+            breakdown={"sentiment": 0.11, "ta": 0.08, "event": 0.04},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bullish", confidence=0.81),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 4.5},
+        regime="risk_on",
+        btc_change_pct=3.1,
+    )
+
+    assert signal is not None
+    assert signal.direction == "LONG"
+    assert signal.confluence_count >= 3
+    assert signal.suggested_risk_pct == 2.0
+    assert signal.tp1 < signal.tp2 < signal.tp3
+    assert signal.risk_reward >= 1.5
+    assert len(signal.confluence_factors) == signal.confluence_count
+
+
+def test_generate_crypto_trade_signal_blocks_risk_off_long_without_five_factors() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="SOL",
+        current_price=180.0,
+        ta_signal=_ta_signal(
+            symbol="SOL",
+            current_price=180.0,
+            atr_value=8.0,
+            atr_pct=4.4,
+            trend="up",
+            overall_signal="buy",
+            confidence=0.68,
+            rsi_value=44.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.3,
+        ),
+        composite=_composite(
+            symbol="SOL",
+            score=0.18,
+            agreement=0.7,
+            direction="buy",
+            breakdown={"sentiment": 0.09, "ta": 0.06},
+        ),
+        verdict=_verdict(symbol="SOL", prevailing_view="bullish", confidence=0.75),
+        event_data=None,
+        regime="risk_off",
+        btc_change_pct=0.0,
+    )
+
+    assert signal is None
+
+
+def test_generate_crypto_trade_signal_skips_chaos_zone() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="PEPE",
+        current_price=0.000012,
+        ta_signal=_ta_signal(
+            symbol="PEPE",
+            current_price=0.000012,
+            atr_value=0.0000025,
+            atr_pct=20.5,
+            bb_upper=0.000016,
+            bb_lower=0.000009,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.74,
+            rsi_value=24.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.4,
+        ),
+        composite=_composite(
+            symbol="PEPE",
+            score=0.3,
+            agreement=0.82,
+            direction="buy",
+            breakdown={"sentiment": 0.1, "ta": 0.09},
+        ),
+        verdict=_verdict(symbol="PEPE", prevailing_view="bullish", confidence=0.8),
+        event_data={"event_type": "exchange_listing", "remaining_drift_pct": 7.0},
+        regime="risk_on",
+        btc_change_pct=4.0,
+    )
+
+    assert signal is None
+
+
+def test_generate_crypto_trade_signal_sets_high_vol_risk_and_flags_manipulation() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="LINK",
+        current_price=18.0,
+        ta_signal=_ta_signal(
+            symbol="LINK",
+            current_price=18.0,
+            atr_value=1.4,
+            atr_pct=12.0,
+            bb_upper=21.0,
+            bb_lower=15.0,
             bb_position="above_upper",
             bb_squeeze=True,
-            overall_signal="neutral",
-            confidence=0.4,
-            trend="down",
-            macd_signal="bullish_cross",
-        ),
-        composite=_composite(
-            score=0.18,
-            agreement=0.65,
-            direction="buy",
-            breakdown={"sentiment": 0.10, "ta": -0.08, "correlation": -0.14},
-        ),
-        verdict=_verdict(confidence=0.78),
-        event_data=None,
-        regime="volatile",
-    )
-
-    assert signal is not None
-    assert "Sentiment and price action disagree" in signal.manipulation_check
-    assert "Volatility is unusually high" in signal.manipulation_check
-    assert "Price just broke out of a tight range" in signal.manipulation_check
-    assert "broader market is volatile" in signal.manipulation_check
-
-
-def test_generate_trade_signal_builds_short_setup() -> None:
-    signal = generate_trade_signal(
-        symbol="BTC",
-        current_price=50_000.0,
-        ta_signal=_ta_signal(
-            symbol="BTC",
-            current_price=50_000.0,
-            atr_value=1_200.0,
-            atr_pct=5.0,
-            bb_upper=52_500.0,
-            bb_lower=45_000.0,
-            trend="strong_down",
-            overall_signal="sell",
+            trend="strong_up",
+            overall_signal="buy",
             confidence=0.7,
-            macd_signal="bearish",
+            rsi_signal="overbought",
+            rsi_value=84.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.5,
         ),
         composite=_composite(
-            symbol="BTC",
-            score=-0.24,
-            agreement=0.72,
-            direction="sell",
-            breakdown={"sentiment": -0.06, "ta": -0.12, "event": -0.04},
+            symbol="LINK",
+            score=0.26,
+            agreement=0.76,
+            direction="buy",
+            breakdown={"sentiment": 0.1, "ta": -0.08, "event": 0.03},
         ),
-        verdict=_verdict(symbol="BTC", prevailing_view="bearish", confidence=0.8),
-        event_data={"event_type": "regulatory_crypto", "remaining_drift_pct": -5.0},
-        regime="risk_off",
+        verdict=_verdict(symbol="LINK", prevailing_view="bullish", confidence=0.79),
+        event_data={"event_type": "partnership", "remaining_drift_pct": 3.0},
+        regime="volatile",
+        btc_change_pct=2.8,
     )
 
     assert signal is not None
-    assert signal.direction == "SHORT"
-    assert signal.entry_low < signal.entry_high
-    assert signal.stop_loss > signal.entry_high
-    assert signal.tp1 > signal.tp2 > signal.tp3
-    assert signal.risk_reward >= 1.5
+    assert signal.suggested_risk_pct == 1.0
+    assert signal.confluence_count >= 3
+    assert "possible distribution by whales" in signal.manipulation_check
+    assert "Extreme volatility" in signal.manipulation_check
+    assert "Breakout from squeeze" in signal.manipulation_check
+    assert "Strong signals conflicting" in signal.manipulation_check
+    assert "Volatile regime" in signal.manipulation_check

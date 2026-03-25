@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 from src.agents.state import DebateVerdict
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ConfluenceFactor:
+    name: str
+    direction: str
+    strength: float
+    description: str
 
 
 @dataclass(slots=True)
@@ -29,7 +40,10 @@ class TradeSignal:
     timeframe: str
     reasoning: str
     manipulation_check: str
-    timestamp: float
+    confluence_count: int = 0
+    confluence_factors: list[ConfluenceFactor] = field(default_factory=list)
+    suggested_risk_pct: float = 2.0
+    timestamp: float = field(default_factory=time.time)
 
 
 def generate_trade_signal(
@@ -70,7 +84,11 @@ def generate_trade_signal(
     if _has_strong_ta_conflict(direction, ta_signal):
         return None
 
-    atr_value = ta_signal.atr_value if ta_signal is not None and ta_signal.atr_value > 0 else current_price * 0.03
+    atr_value = (
+        ta_signal.atr_value
+        if ta_signal is not None and ta_signal.atr_value > 0
+        else current_price * 0.03
+    )
     sl_distance = max(atr_value * 1.5, current_price * 0.015)
 
     if direction == "LONG":
@@ -157,7 +175,386 @@ def generate_trade_signal(
         timeframe=timeframe,
         reasoning=_build_reasoning(direction, regime, ta_signal, composite, verdict, event_data),
         manipulation_check=_check_manipulation(ta_signal, composite, regime),
-        timestamp=time.time(),
+    )
+
+
+def generate_crypto_trade_signal(
+    *,
+    symbol: str,
+    current_price: float,
+    ta_signal: TASignal | None,
+    composite: CompositeScore | None,
+    verdict: DebateVerdict | None,
+    event_data: Mapping[str, object] | None,
+    regime: str,
+    btc_change_pct: float = 0.0,
+) -> TradeSignal | None:
+    factors: list[ConfluenceFactor] = []
+
+    if ta_signal is not None:
+        if ta_signal.trend in {"strong_up", "up"}:
+            factors.append(
+                ConfluenceFactor(
+                    name="trend",
+                    direction="bullish",
+                    strength=0.8 if ta_signal.trend == "strong_up" else 0.6,
+                    description="Price above key moving averages - uptrend intact",
+                )
+            )
+        elif ta_signal.trend in {"strong_down", "down"}:
+            factors.append(
+                ConfluenceFactor(
+                    name="trend",
+                    direction="bearish",
+                    strength=0.8 if ta_signal.trend == "strong_down" else 0.6,
+                    description="Price below key moving averages - downtrend in place",
+                )
+            )
+
+        rsi = ta_signal.rsi_value
+        if rsi < 20:
+            factors.append(
+                ConfluenceFactor(
+                    name="rsi_extreme",
+                    direction="bullish",
+                    strength=0.9,
+                    description=f"RSI at {rsi:.0f} - deeply oversold, bounce likely",
+                )
+            )
+        elif rsi < 35 and ta_signal.trend != "strong_down":
+            factors.append(
+                ConfluenceFactor(
+                    name="rsi_oversold",
+                    direction="bullish",
+                    strength=0.6,
+                    description=f"RSI at {rsi:.0f} - approaching oversold territory",
+                )
+            )
+        elif rsi > 80:
+            factors.append(
+                ConfluenceFactor(
+                    name="rsi_extreme",
+                    direction="bearish",
+                    strength=0.9,
+                    description=f"RSI at {rsi:.0f} - deeply overbought, pullback likely",
+                )
+            )
+        elif rsi > 65 and ta_signal.trend != "strong_up":
+            factors.append(
+                ConfluenceFactor(
+                    name="rsi_overbought",
+                    direction="bearish",
+                    strength=0.6,
+                    description=f"RSI at {rsi:.0f} - approaching overbought territory",
+                )
+            )
+
+        if ta_signal.macd_signal == "bullish_cross":
+            factors.append(
+                ConfluenceFactor(
+                    name="macd_cross",
+                    direction="bullish",
+                    strength=0.8,
+                    description="MACD bullish crossover - momentum shifting positive",
+                )
+            )
+        elif ta_signal.macd_signal == "bearish_cross":
+            factors.append(
+                ConfluenceFactor(
+                    name="macd_cross",
+                    direction="bearish",
+                    strength=0.8,
+                    description="MACD bearish crossover - momentum shifting negative",
+                )
+            )
+        elif ta_signal.macd_signal == "bullish" and ta_signal.macd_histogram > 0:
+            factors.append(
+                ConfluenceFactor(
+                    name="macd_momentum",
+                    direction="bullish",
+                    strength=0.5,
+                    description="MACD positive - bullish momentum continues",
+                )
+            )
+        elif ta_signal.macd_signal == "bearish" and ta_signal.macd_histogram < 0:
+            factors.append(
+                ConfluenceFactor(
+                    name="macd_momentum",
+                    direction="bearish",
+                    strength=0.5,
+                    description="MACD negative - bearish momentum continues",
+                )
+            )
+
+        if ta_signal.bb_position == "below_lower":
+            factors.append(
+                ConfluenceFactor(
+                    name="bollinger",
+                    direction="bullish",
+                    strength=0.7,
+                    description="Price below lower Bollinger Band - mean reversion likely",
+                )
+            )
+        elif ta_signal.bb_position == "above_upper":
+            factors.append(
+                ConfluenceFactor(
+                    name="bollinger",
+                    direction="bearish",
+                    strength=0.7,
+                    description="Price above upper Bollinger Band - overextended",
+                )
+            )
+
+        if ta_signal.bb_squeeze:
+            squeeze_direction = "bullish" if ta_signal.macd_histogram >= 0 else "bearish"
+            factors.append(
+                ConfluenceFactor(
+                    name="squeeze",
+                    direction=squeeze_direction,
+                    strength=0.6,
+                    description="Bollinger squeeze - big move imminent, direction from MACD",
+                )
+            )
+
+    event_type = str(event_data.get("event_type", "")) if event_data is not None else ""
+    remaining = _event_float(event_data, "remaining_drift_pct") or 0.0
+    if event_type and event_type not in {"general_news", "unknown", "none"}:
+        if remaining > 1.0:
+            factors.append(
+                ConfluenceFactor(
+                    name="event_car",
+                    direction="bullish",
+                    strength=min(0.8, remaining / 5),
+                    description=(
+                        f"Event ({event_type}) with {remaining:+.1f}% remaining upside based on historical data"
+                    ),
+                )
+            )
+        elif remaining < -1.0:
+            factors.append(
+                ConfluenceFactor(
+                    name="event_car",
+                    direction="bearish",
+                    strength=min(0.8, abs(remaining) / 5),
+                    description=(
+                        f"Event ({event_type}) with {remaining:+.1f}% remaining downside based on historical data"
+                    ),
+                )
+            )
+
+    if composite is not None:
+        sentiment = composite.signal_breakdown.get("sentiment", 0.0)
+        if sentiment > 0.05:
+            factors.append(
+                ConfluenceFactor(
+                    name="sentiment",
+                    direction="bullish",
+                    strength=min(0.7, sentiment * 5),
+                    description="Positive news sentiment supporting the move",
+                )
+            )
+        elif sentiment < -0.05:
+            factors.append(
+                ConfluenceFactor(
+                    name="sentiment",
+                    direction="bearish",
+                    strength=min(0.7, abs(sentiment) * 5),
+                    description="Negative news sentiment adding selling pressure",
+                )
+            )
+
+    if verdict is not None and verdict.confidence > 0.6:
+        if verdict.prevailing_view == "bullish":
+            factors.append(
+                ConfluenceFactor(
+                    name="ai_verdict",
+                    direction="bullish",
+                    strength=verdict.confidence,
+                    description=f"AI analysis concludes bullish ({verdict.confidence:.0%} confidence)",
+                )
+            )
+        elif verdict.prevailing_view == "bearish":
+            factors.append(
+                ConfluenceFactor(
+                    name="ai_verdict",
+                    direction="bearish",
+                    strength=verdict.confidence,
+                    description=f"AI analysis concludes bearish ({verdict.confidence:.0%} confidence)",
+                )
+            )
+
+    if regime == "risk_on":
+        factors.append(
+            ConfluenceFactor(
+                name="regime",
+                direction="bullish",
+                strength=0.5,
+                description="Risk-on market environment - favorable for crypto longs",
+            )
+        )
+    elif regime == "risk_off":
+        factors.append(
+            ConfluenceFactor(
+                name="regime",
+                direction="bearish",
+                strength=0.6,
+                description="Risk-off environment - headwinds for crypto",
+            )
+        )
+
+    if symbol.upper() != "BTC" and abs(btc_change_pct) > 1:
+        if btc_change_pct > 2:
+            factors.append(
+                ConfluenceFactor(
+                    name="btc_tailwind",
+                    direction="bullish",
+                    strength=0.5,
+                    description=f"BTC up {btc_change_pct:+.1f}% - broad crypto tailwind",
+                )
+            )
+        elif btc_change_pct < -2:
+            factors.append(
+                ConfluenceFactor(
+                    name="btc_headwind",
+                    direction="bearish",
+                    strength=0.5,
+                    description=f"BTC down {btc_change_pct:+.1f}% - broad crypto headwind",
+                )
+            )
+
+    bullish_factors = [factor for factor in factors if factor.direction == "bullish"]
+    bearish_factors = [factor for factor in factors if factor.direction == "bearish"]
+    bullish_score = sum(factor.strength for factor in bullish_factors)
+    bearish_score = sum(factor.strength for factor in bearish_factors)
+
+    direction: str
+    active_factors: list[ConfluenceFactor]
+    opposing_factors: list[ConfluenceFactor]
+    if len(bullish_factors) >= 3 and bullish_score > (bearish_score * 1.3):
+        direction = "LONG"
+        active_factors = bullish_factors
+        opposing_factors = bearish_factors
+    elif len(bearish_factors) >= 3 and bearish_score > (bullish_score * 1.3):
+        direction = "SHORT"
+        active_factors = bearish_factors
+        opposing_factors = bullish_factors
+    else:
+        logger.debug(
+            "Skipping %s: insufficient confluence (%d bullish, %d bearish)",
+            symbol.upper(),
+            len(bullish_factors),
+            len(bearish_factors),
+        )
+        return None
+
+    if direction == "LONG" and regime == "risk_off" and len(active_factors) < 5:
+        return None
+
+    atr = ta_signal.atr_value if ta_signal is not None and ta_signal.atr_value > 0 else current_price * 0.05
+    atr_pct = ta_signal.atr_pct if ta_signal is not None else 5.0
+    if atr_pct > 15:
+        return None
+
+    atr_multiplier = 2.5 if atr_pct > 6 else 2.0
+    sl_distance = atr * atr_multiplier
+
+    if direction == "LONG":
+        entry_high = current_price
+        entry_low = max(current_price - (atr * 0.3), 0.0000001)
+        if ta_signal is not None and current_price - atr <= ta_signal.ema_20 <= current_price:
+            entry_low = min(entry_low, ta_signal.ema_20)
+        stop_loss = max(entry_low - sl_distance, 0.0000001)
+        tp1 = entry_high + (sl_distance * 1.5)
+        tp2 = entry_high + (sl_distance * 2.5)
+        tp3 = entry_high + (sl_distance * 4.0)
+
+        if remaining > 1:
+            drift_target = current_price * (1 + remaining / 100)
+            if tp1 < drift_target < tp3:
+                tp2 = max(tp2, drift_target)
+
+        if (
+            ta_signal is not None
+            and ta_signal.bb_upper > tp2
+            and ta_signal.bb_upper < tp3
+        ):
+            tp3 = min(tp3, ta_signal.bb_upper * 1.02)
+    else:
+        entry_low = current_price
+        entry_high = current_price + (atr * 0.3)
+        if ta_signal is not None and current_price <= ta_signal.ema_20 <= current_price + atr:
+            entry_high = max(entry_high, ta_signal.ema_20)
+        stop_loss = entry_high + sl_distance
+        tp1 = entry_low - (sl_distance * 1.5)
+        tp2 = entry_low - (sl_distance * 2.5)
+        tp3 = entry_low - (sl_distance * 4.0)
+
+        if remaining < -1:
+            drift_target = current_price * (1 + remaining / 100)
+            if tp3 < drift_target < tp1:
+                tp2 = min(tp2, drift_target)
+
+        if ta_signal is not None and ta_signal.bb_lower < tp2 and ta_signal.bb_lower > tp3:
+            tp3 = max(tp3, ta_signal.bb_lower * 0.98)
+
+    entry_reference = current_price
+    tp1, tp2, tp3 = _normalize_targets(direction, entry_reference, sl_distance, tp1, tp2, tp3)
+    risk = abs(entry_reference - stop_loss)
+    reward = abs(tp2 - entry_reference)
+    if risk <= 0:
+        return None
+    risk_reward = reward / risk
+    if risk_reward < 1.5:
+        return None
+
+    days_to_tp2 = reward / max(atr, 0.0001)
+    if days_to_tp2 < 2:
+        timeframe = "1-3 days"
+    elif days_to_tp2 < 5:
+        timeframe = "3-7 days"
+    else:
+        timeframe = "1-2 weeks"
+
+    suggested_risk_pct = 1.0 if atr_pct > 6 else 2.0
+    confidence = min(
+        0.90,
+        0.40 + (len(active_factors) * 0.08) + (sum(f.strength for f in active_factors) * 0.05),
+    )
+    stop_loss_pct = abs(entry_reference - stop_loss) / entry_reference * 100
+    tp1_pct = abs(tp1 - entry_reference) / entry_reference * 100
+    tp2_pct = abs(tp2 - entry_reference) / entry_reference * 100
+    tp3_pct = abs(tp3 - entry_reference) / entry_reference * 100
+    manipulation = _check_manipulation_v2(ta_signal, composite, regime, factors)
+
+    top_reasons = sorted(active_factors, key=lambda factor: factor.strength, reverse=True)[:3]
+    reasoning = ". ".join(factor.description for factor in top_reasons) + "."
+    if opposing_factors:
+        top_risk = max(opposing_factors, key=lambda factor: factor.strength)
+        reasoning += f" Main risk: {top_risk.description}."
+
+    precision = _decimals(current_price)
+    return TradeSignal(
+        symbol=symbol.upper(),
+        direction=direction,
+        confidence=round(confidence, 4),
+        entry_low=round(entry_low, precision),
+        entry_high=round(entry_high, precision),
+        stop_loss=round(stop_loss, precision),
+        stop_loss_pct=round(stop_loss_pct, 1),
+        risk_per_unit=round(risk, precision),
+        tp1=round(tp1, precision),
+        tp1_pct=round(tp1_pct, 1),
+        tp2=round(tp2, precision),
+        tp2_pct=round(tp2_pct, 1),
+        tp3=round(tp3, precision),
+        tp3_pct=round(tp3_pct, 1),
+        risk_reward=round(risk_reward, 1),
+        timeframe=timeframe,
+        reasoning=reasoning,
+        manipulation_check=manipulation,
+        confluence_count=len(active_factors),
+        confluence_factors=sorted(active_factors, key=lambda factor: factor.strength, reverse=True),
+        suggested_risk_pct=suggested_risk_pct,
     )
 
 
@@ -179,19 +576,19 @@ def _normalize_targets(
     tp2: float,
     tp3: float,
 ) -> tuple[float, float, float]:
-    min_step = max(risk * 0.25, entry_reference * 0.002, 0.0001)
+    min_step = max(risk * 0.25, entry_reference * 0.002, 0.0000001)
     if direction == "LONG":
         targets = sorted([tp1, tp2, tp3])
-        tp1 = max(targets[0], entry_reference + min_step)
-        tp2 = max(targets[1], tp1 + min_step)
-        tp3 = max(targets[2], tp2 + min_step)
-        return tp1, tp2, tp3
+        first = max(targets[0], entry_reference + min_step)
+        second = max(targets[1], first + min_step)
+        third = max(targets[2], second + min_step)
+        return first, second, third
 
     targets = sorted([tp1, tp2, tp3], reverse=True)
-    tp1 = min(targets[0], entry_reference - min_step)
-    tp2 = min(targets[1], tp1 - min_step)
-    tp3 = min(targets[2], tp2 - min_step)
-    return tp1, tp2, tp3
+    first = min(targets[0], entry_reference - min_step)
+    second = min(targets[1], first - min_step)
+    third = min(targets[2], second - min_step)
+    return first, second, third
 
 
 def _build_reasoning(
@@ -210,7 +607,9 @@ def _build_reasoning(
     drift_pct = _event_float(event_data, "remaining_drift_pct")
     if event_type and event_type not in {"general_news", "unknown", "none"}:
         if drift_pct is not None:
-            reasons.append(f"{event_type.replace('_', ' ')} still shows {drift_pct:+.1f}% remaining drift")
+            reasons.append(
+                f"{event_type.replace('_', ' ')} still shows {drift_pct:+.1f}% remaining drift"
+            )
         else:
             reasons.append(f"{event_type.replace('_', ' ')} is still influencing the setup")
 
@@ -223,8 +622,7 @@ def _build_reasoning(
             reasons.append("broader signal stack is still mixed")
 
     if ta_signal is not None:
-        trend_text = ta_signal.trend.replace("_", " ")
-        reasons.append(f"trend is {trend_text}")
+        reasons.append(f"trend is {ta_signal.trend.replace('_', ' ')}")
         if ta_signal.rsi_signal == "oversold":
             reasons.append("momentum is washed out and could bounce")
         elif ta_signal.rsi_signal == "overbought":
@@ -252,9 +650,13 @@ def _check_manipulation(
         technical = composite.signal_breakdown.get("ta", 0.0)
         correlation = composite.signal_breakdown.get("correlation", 0.0)
         if sentiment > 0.05 and technical < -0.05:
-            flags.append("Sentiment and price action disagree: positive news but weak tape can mean distribution.")
+            flags.append(
+                "Sentiment and price action disagree: positive news but weak tape can mean distribution."
+            )
         elif sentiment < -0.05 and technical > 0.05:
-            flags.append("Sentiment and price action disagree: negative news with firm tape can mean accumulation.")
+            flags.append(
+                "Sentiment and price action disagree: negative news with firm tape can mean accumulation."
+            )
         if abs(correlation) > 0.12 and abs(technical) > 0.05 and (correlation * technical) < 0:
             flags.append("Cross-market behavior is diverging from price action, which can be a warning sign.")
 
@@ -270,6 +672,38 @@ def _check_manipulation(
     return "No manipulation flags detected." if not flags else "\n".join(flags)
 
 
+def _check_manipulation_v2(
+    ta_signal: TASignal | None,
+    composite: CompositeScore | None,
+    regime: str,
+    factors: list[ConfluenceFactor],
+) -> str:
+    flags: list[str] = []
+    if composite is not None:
+        sentiment = composite.signal_breakdown.get("sentiment", 0.0)
+        technical = composite.signal_breakdown.get("ta", 0.0)
+        if sentiment > 0.05 and technical < -0.05:
+            flags.append("Positive news but bearish price action - possible distribution by whales")
+        elif sentiment < -0.05 and technical > 0.05:
+            flags.append("Negative news but bullish price action - possible accumulation")
+
+    if ta_signal is not None:
+        if ta_signal.atr_pct > 10:
+            flags.append("Extreme volatility - reduce position size, use wider stops")
+        if ta_signal.bb_squeeze and ta_signal.bb_position in {"above_upper", "below_lower"}:
+            flags.append("Breakout from squeeze - verify momentum before full entry")
+
+    strong_bull = sum(1 for factor in factors if factor.direction == "bullish" and factor.strength > 0.7)
+    strong_bear = sum(1 for factor in factors if factor.direction == "bearish" and factor.strength > 0.7)
+    if strong_bull > 0 and strong_bear > 0:
+        flags.append("Strong signals conflicting - enter with smaller size, scale in on confirmation")
+
+    if regime == "volatile":
+        flags.append("Volatile regime - use 50% normal position size")
+
+    return "No manipulation flags." if not flags else "\n".join(flags)
+
+
 def _event_float(event_data: Mapping[str, object] | None, key: str) -> float | None:
     if event_data is None:
         return None
@@ -277,3 +711,11 @@ def _event_float(event_data: Mapping[str, object] | None, key: str) -> float | N
     if isinstance(value, int | float):
         return float(value)
     return None
+
+
+def _decimals(price: float) -> int:
+    if price > 1:
+        return 2
+    if price > 0.01:
+        return 4
+    return 6

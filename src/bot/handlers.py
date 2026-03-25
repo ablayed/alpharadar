@@ -25,7 +25,7 @@ from src.sentiment.analyzer import SentimentAnalyzer
 from src.signals.models import CompositeScore
 from src.storage.database import Database, WatchlistItem
 from src.ta.signals import TASignal
-from src.trade import TradeSignal, generate_trade_signal
+from src.trade import TradeSignal, generate_crypto_trade_signal, generate_trade_signal
 
 logger = logging.getLogger(__name__)
 
@@ -499,7 +499,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     aggregator = _aggregator_from_context(context)
 
     try:
-        data = await _latest_briefing_data(context)
+        data = await _latest_briefing_data(context, include_agent_analysis=True)
         price_item = _price_item_for_symbol(data, symbol)
         if price_item is None:
             await msg.edit_text(f"\u26A0\uFE0F Could not find price data for {html.escape(symbol)}.")
@@ -526,21 +526,49 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if data.regime_state is not None
             else "default"
         )
-        signal = generate_trade_signal(
-            symbol=symbol,
-            current_price=price_item.current_price,
-            ta_signal=ta_signal,
-            composite=composite,
-            verdict=verdict,
-            event_data=_event_payload(_event_for_symbol(data, symbol)),
-            regime=regime_key,
-        )
+        event_payload = _event_payload(_event_for_symbol(data, symbol))
+        if price_item.asset_type.value == "crypto":
+            signal = generate_crypto_trade_signal(
+                symbol=symbol,
+                current_price=price_item.current_price,
+                ta_signal=ta_signal,
+                composite=composite,
+                verdict=verdict,
+                event_data=event_payload,
+                regime=regime_key,
+                btc_change_pct=_btc_change_pct(data),
+            )
+        else:
+            signal = generate_trade_signal(
+                symbol=symbol,
+                current_price=price_item.current_price,
+                ta_signal=ta_signal,
+                composite=composite,
+                verdict=verdict,
+                event_data=event_payload,
+                regime=regime_key,
+            )
 
         if signal is None:
-            await msg.edit_text(_format_no_trade_text(symbol), parse_mode="HTML")
+            await msg.edit_text(
+                _format_no_trade_text(symbol, crypto_style=price_item.asset_type.value == "crypto"),
+                parse_mode="HTML",
+            )
             return
 
-        await msg.edit_text(_format_trade_text(signal), parse_mode="HTML")
+        if update.effective_chat is None:
+            return
+        trade_text = (
+            _format_crypto_trade_text(signal)
+            if price_item.asset_type.value == "crypto"
+            else _format_trade_text(signal)
+        )
+        await _send_long_message(
+            context.bot,
+            update.effective_chat.id,
+            trade_text,
+            initial_message=msg,
+        )
         await aggregator.tracker.log_prediction(
             symbol=symbol,
             asset_type=price_item.asset_type.value,
@@ -564,7 +592,9 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.message is None:
         return
 
-    msg = await update.message.reply_text("\U0001F3AF Scanning all assets for trade setups...")
+    msg = await update.message.reply_text(
+        "\U0001F3AF Scanning crypto watchlist for high-probability setups..."
+    )
     aggregator = _aggregator_from_context(context)
 
     try:
@@ -575,9 +605,10 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if data.regime_state is not None
             else "default"
         )
-        for price_item in [*data.stock_prices, *data.crypto_prices]:
+        btc_change = _btc_change_pct(data)
+        for price_item in data.crypto_prices:
             symbol = price_item.symbol.upper()
-            signal = generate_trade_signal(
+            signal = generate_crypto_trade_signal(
                 symbol=symbol,
                 current_price=price_item.current_price,
                 ta_signal=data.ta_signals.get(symbol),
@@ -585,6 +616,7 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 verdict=_verdict_for_symbol(data.agent_analysis, symbol),
                 event_data=_event_payload(_event_for_symbol(data, symbol)),
                 regime=regime_key,
+                btc_change_pct=btc_change,
             )
             if signal is None:
                 continue
@@ -592,25 +624,38 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if not signals:
             await msg.edit_text(
-                "No actionable trade setups found right now.\n\nSignals are too weak or too conflicting."
+                "<b>NO TRADE SETUPS TODAY</b>\n\n"
+                "None of the crypto assets meet the 3+ confluence requirement.\n"
+                "This means the risk of entering is higher than the potential reward.\n\n"
+                "<i>Patience is a position. The best trade is often no trade.</i>",
+                parse_mode="HTML",
             )
             return
 
         signals.sort(key=lambda item: item[0].confidence, reverse=True)
-        lines = ["\U0001F3AF <b>ACTIVE TRADE SIGNALS</b>", ""]
-        for signal, price_item in signals[:10]:
+        lines = [f"\U0001F3AF <b>CRYPTO TRADE SIGNALS</b> ({len(signals)} setups found)", ""]
+        for signal, price_item in signals[:5]:
             direction_emoji = "\U0001F7E2" if signal.direction == "LONG" else "\U0001F534"
+            stars = _trade_confluence_stars(signal.confluence_count)
             lines.append(
                 f"{direction_emoji} <b>{html.escape(signal.symbol)}</b> "
-                f"{html.escape(signal.direction)} ({signal.confidence:.0%})"
+                f"{html.escape(signal.direction)} ({signal.confidence:.0%}) {stars}".rstrip()
             )
             lines.append(
-                f"   Entry: {_format_trade_price(signal.entry_low)}-"
-                f"{_format_trade_price(signal.entry_high)} | "
-                f"SL: {_format_trade_price(signal.stop_loss)} | "
-                f"TP2: {_format_trade_price(signal.tp2)}"
+                f"   Entry: {_format_trade_price(signal.entry_low)} - "
+                f"{_format_trade_price(signal.entry_high)}"
             )
-            lines.append(f"   R:R 1:{signal.risk_reward} | {html.escape(signal.timeframe)}")
+            lines.append(
+                f"   SL: {_format_trade_price(signal.stop_loss)} (-{signal.stop_loss_pct:.1f}%) | "
+                f"TP1: {_format_trade_price(signal.tp1)} | "
+                f"TP2: {_format_trade_price(signal.tp2)} | "
+                f"TP3: {_format_trade_price(signal.tp3)}"
+            )
+            lines.append(
+                f"   R:R 1:{signal.risk_reward} | {html.escape(signal.timeframe)} | "
+                f"Risk: {signal.suggested_risk_pct:.0f}%"
+            )
+            lines.append(f"   <i>{html.escape(signal.reasoning[:150], quote=False)}</i>")
             lines.append("")
             await aggregator.tracker.log_prediction(
                 symbol=signal.symbol,
@@ -624,8 +669,18 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 predicted_target=signal.tp2,
             )
 
-        lines.append("Not financial advice. Use /trade &lt;symbol&gt; for full details.")
-        await msg.edit_text("\n".join(lines), parse_mode="HTML")
+        lines.append(
+            "<b>NOT financial advice.</b> Never risk more than 2% per trade.\n"
+            "Use /trade &lt;symbol&gt; for full details on any setup."
+        )
+        if update.effective_chat is None:
+            return
+        await _send_long_message(
+            context.bot,
+            update.effective_chat.id,
+            "\n".join(lines),
+            initial_message=msg,
+        )
     except Exception as exc:
         logger.exception("Trades command failed")
         escaped_error = html.escape(str(exc), quote=False)
@@ -1124,12 +1179,57 @@ def _format_trade_text(signal: TradeSignal) -> str:
     )
 
 
-def _format_no_trade_text(symbol: str) -> str:
+def _format_crypto_trade_text(signal: TradeSignal) -> str:
+    direction_emoji = "\U0001F7E2" if signal.direction == "LONG" else "\U0001F534"
+    confluence_lines = "\n".join(_format_confluence_line(factor) for factor in signal.confluence_factors)
+    return (
+        f"\U0001F3AF <b>TRADE SIGNAL: {html.escape(signal.symbol)}</b>\n\n"
+        f"Direction: {direction_emoji} <b>{html.escape(signal.direction)}</b>\n"
+        f"Confidence: {signal.confidence:.0%} | "
+        f"Confluence: {signal.confluence_count} factors {_trade_confluence_stars(signal.confluence_count)}\n\n"
+        f"<b>Entry zone:</b> {_format_trade_price(signal.entry_low)} - {_format_trade_price(signal.entry_high)}\n"
+        f"<b>Stop loss:</b> {_format_trade_price(signal.stop_loss)} (-{signal.stop_loss_pct:.1f}%)\n"
+        f"<b>Risk per unit:</b> {_format_trade_price(signal.risk_per_unit)}\n\n"
+        f"<b>Take profit:</b>\n"
+        f"TP1: {_format_trade_price(signal.tp1)} (+{signal.tp1_pct:.1f}%) - take 1/3 off\n"
+        f"TP2: {_format_trade_price(signal.tp2)} (+{signal.tp2_pct:.1f}%) - take 1/3, move SL to breakeven\n"
+        f"TP3: {_format_trade_price(signal.tp3)} (+{signal.tp3_pct:.1f}%) - trail the rest\n\n"
+        f"<b>R:R:</b> 1:{signal.risk_reward} | <b>Timeframe:</b> {html.escape(signal.timeframe)}\n"
+        f"<b>Suggested risk:</b> {signal.suggested_risk_pct:.0f}% of portfolio\n\n"
+        f"<b>Why this trade:</b>\n{confluence_lines}\n\n"
+        f"{html.escape(signal.manipulation_check, quote=False)}\n\n"
+        f"<b>Execution plan:</b>\n"
+        f"1. Enter 1/3 size at {_format_trade_price(signal.entry_low)}\n"
+        f"2. Add 1/3 on confirmation if price holds in the entry zone\n"
+        f"3. Add the final 1/3 if momentum expands in your favor\n"
+        f"4. Take profit in thirds at TP1, TP2, and TP3\n"
+        f"5. Move SL to breakeven after TP1 is hit\n\n"
+        "<b>NOT financial advice.</b> Every trade can lose 100% of risked capital.\n"
+        "Close dead-money trades that do not move in 5-7 days."
+    )
+
+
+def _format_no_trade_text(symbol: str, *, crypto_style: bool = False) -> str:
+    if crypto_style:
+        return (
+            f"\u26A0\uFE0F <b>NO TRADE - {html.escape(symbol)}</b>\n\n"
+            "Not enough confluence signals (need 3+) or risk/reward is too low.\n"
+            "The best trade is often no trade. Wait for a better setup.\n\n"
+            "<i>Patience is how the small minority who profit separate themselves from the crowd.</i>"
+        )
     return (
         f"\u26A0\uFE0F <b>NO TRADE - {html.escape(symbol)}</b>\n\n"
         "Signals are too weak or too conflicting to produce a reliable setup.\n"
         "Wait for clearer conditions."
     )
+
+
+def _format_confluence_line(factor: object) -> str:
+    name = getattr(factor, "description", "")
+    strength = float(getattr(factor, "strength", 0.0) or 0.0)
+    filled = max(0, min(5, int(round(strength * 5))))
+    bar = ("#" * filled) + ("-" * (5 - filled))
+    return f"[{bar}] {html.escape(str(name), quote=False)}"
 
 
 def _format_signals_text(symbol: str, composite: CompositeScore) -> str:
@@ -1263,6 +1363,13 @@ def _event_payload(event: DetectedEvent | None) -> dict[str, object] | None:
         "remaining_drift_pct": event.remaining_drift_pct,
         "expected_car_pct": event.expected_car_pct,
     }
+
+
+def _btc_change_pct(data: BriefingData) -> float:
+    for item in data.crypto_prices:
+        if item.symbol.upper() == "BTC":
+            return item.change_24h_pct
+    return 0.0
 
 
 def _event_type_for_symbol(data: BriefingData, symbol: str) -> str | None:
@@ -1520,6 +1627,11 @@ def _format_trade_price(value: float) -> str:
     if value >= 1:
         return f"${value:.2f}"
     return f"${value:.4f}"
+
+
+def _trade_confluence_stars(count: int) -> str:
+    filled = max(0, min(5, count))
+    return ("*" * filled) + ("." * (5 - filled))
 
 
 def _trade_direction_to_prediction(direction: str) -> str:
