@@ -114,6 +114,7 @@ def _help_text() -> str:
         f"{settings.timezone}.\n\n"
         "Commands:\n"
         "/briefing  Get a briefing right now\n"
+        "/history  Today's biggest crypto moves\n"
         "/watchlist  View your watchlist\n"
         "/add AAPL  Add a stock to watchlist\n"
         "/add btc  Add a crypto to watchlist\n"
@@ -153,6 +154,82 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.message is None:
         return
     await update.message.reply_text(_help_text())
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show today's biggest crypto moves."""
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    aggregator = _aggregator_from_context(context)
+
+    try:
+        data = await aggregator.gather_briefing_data(include_agent_analysis=False)
+        _store_latest_briefing(context, data)
+    except Exception:
+        logger.exception("History command failed while fetching data")
+        await update.message.reply_text("⚠️ Could not fetch current data.")
+        return
+
+    cryptos = sorted(
+        data.crypto_prices,
+        key=lambda price: abs(price.change_24h_pct),
+        reverse=True,
+    )
+    if not cryptos:
+        await update.message.reply_text("No crypto data available.")
+        return
+
+    now = datetime.now(ZoneInfo("Europe/London"))
+    lines = [
+        "📜 <b>TODAY'S CRYPTO MOVES</b>",
+        now.strftime("%A, %B %d"),
+        "",
+    ]
+
+    for crypto in cryptos:
+        change = crypto.change_24h_pct
+        if change > 5:
+            emoji = "🚀 "
+        elif change > 2:
+            emoji = "🟢 "
+        elif change < -5:
+            emoji = "💥 "
+        elif change < -2:
+            emoji = "🔴 "
+        else:
+            emoji = ""
+
+        week_context = ""
+        if crypto.change_7d_pct is not None:
+            week_context = f" (7d: {crypto.change_7d_pct:+.1f}%)"
+
+        lines.append(
+            f"{emoji}<b>{html.escape(crypto.symbol)}</b> "
+            f"{_format_trade_price(crypto.current_price)} "
+            f"{change:+.1f}%{week_context}"
+        )
+
+    btc = next((crypto for crypto in cryptos if crypto.symbol.upper() == "BTC"), None)
+    if btc is not None or data.total_tvl is not None:
+        lines.append("")
+
+    if btc is not None:
+        if btc.change_24h_pct > 2:
+            lines.append("📊 BTC leading the market higher today")
+        elif btc.change_24h_pct < -2:
+            lines.append("📊 BTC dragging the market lower today")
+        else:
+            lines.append("📊 BTC relatively flat, altcoin moves are more independent today")
+
+    if data.total_tvl is not None:
+        tvl_change = data.tvl_change_24h_pct or 0.0
+        tvl_emoji = "🟢" if tvl_change >= 0 else "🔴"
+        lines.append(f"{tvl_emoji} DeFi TVL: ${data.total_tvl / 1e9:.1f}B ({tvl_change:+.1f}%)")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -703,17 +780,20 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     recent_lines = [
         f"- {html.escape(alert.symbol)} {alert.change_pct:+.1f}% ({alert.severity.value})"
         for alert in recent_alerts
-        if hasattr(alert, "symbol") and hasattr(alert, "change_pct") and hasattr(alert, "severity")
+        if (
+            hasattr(alert, "symbol")
+            and hasattr(alert, "change_pct")
+            and hasattr(alert, "severity")
+            and getattr(alert, "asset_type", None) != "stock"
+        )
     ]
 
     text = (
         "\U0001F514 <b>ALERT STATUS</b>\n\n"
+        "Real-time stream: Binance crypto alerts only\n"
         f"Alerts this hour: {status['alerts_this_hour']}/{status['global_limit']}\n"
         f"Quiet hours: {'Active \U0001F319' if status['quiet_hours'] else 'Off'}\n"
         f"Assets on cooldown: {status['assets_on_cooldown']}\n\n"
-        f"Stock thresholds: {pipeline.THRESHOLDS['stock'][AlertSeverity.INFO]:.0f}% / "
-        f"{pipeline.THRESHOLDS['stock'][AlertSeverity.WARNING]:.0f}% / "
-        f"{pipeline.THRESHOLDS['stock'][AlertSeverity.CRITICAL]:.0f}%\n"
         f"Crypto thresholds: {pipeline.THRESHOLDS['crypto'][AlertSeverity.INFO]:.0f}% / "
         f"{pipeline.THRESHOLDS['crypto'][AlertSeverity.WARNING]:.0f}% / "
         f"{pipeline.THRESHOLDS['crypto'][AlertSeverity.CRITICAL]:.0f}%"
@@ -1015,24 +1095,19 @@ def _websocket_status_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     if not isinstance(ws_tasks, dict):
         return "Not initialized"
 
-    parts: list[str] = []
-    for name, label in (("finnhub", "Finnhub"), ("binance", "Binance")):
-        task = ws_tasks.get(name)
-        if task is None:
-            parts.append(f"{label} idle")
-            continue
-        if hasattr(task, "cancelled") and task.cancelled():
-            parts.append(f"{label} cancelled")
-            continue
-        if hasattr(task, "done") and task.done():
-            try:
-                exc = task.exception() if hasattr(task, "exception") else None
-            except Exception:
-                exc = None
-            parts.append(f"{label} stopped" if exc else f"{label} done")
-            continue
-        parts.append(f"{label} running")
-    return " | ".join(parts)
+    task = ws_tasks.get("binance")
+    suffix = " (crypto only)"
+    if task is None:
+        return f"Binance idle{suffix}"
+    if hasattr(task, "cancelled") and task.cancelled():
+        return f"Binance cancelled{suffix}"
+    if hasattr(task, "done") and task.done():
+        try:
+            exc = task.exception() if hasattr(task, "exception") else None
+        except Exception:
+            exc = None
+        return f"Binance stopped{suffix}" if exc else f"Binance done{suffix}"
+    return f"Binance running{suffix}"
 
 
 def _next_briefing_text() -> str:
@@ -1180,32 +1255,98 @@ def _format_trade_text(signal: TradeSignal) -> str:
 
 
 def _format_crypto_trade_text(signal: TradeSignal) -> str:
-    direction_emoji = "\U0001F7E2" if signal.direction == "LONG" else "\U0001F534"
+    is_long = signal.direction == "LONG"
+    direction_emoji = "\U0001F7E2" if is_long else "\U0001F534"
+    direction_label = signal.direction if is_long else "SHORT BIAS"
     confluence_lines = "\n".join(_format_confluence_line(factor) for factor in signal.confluence_factors)
+    if not confluence_lines:
+        confluence_lines = "No detailed confluence breakdown available."
+
+    zone_label = "Entry zone" if is_long else "Sell/reduce zone"
+    stop_label = "Stop-loss sell" if is_long else "Invalidation level"
+    risk_label = "Risk per coin if stopped" if is_long else "Giveback risk per coin"
+    stop_pct = f"-{signal.stop_loss_pct:.1f}%" if is_long else f"+{signal.stop_loss_pct:.1f}%"
+    spot_note = ""
+    if not is_long:
+        spot_note = (
+            "<b>Spot note:</b> This is a bearish spot setup. Use it to reduce exposure, "
+            "lock in gains, or wait for a better long entry.\n\n"
+        )
+
     return (
-        f"\U0001F3AF <b>TRADE SIGNAL: {html.escape(signal.symbol)}</b>\n\n"
-        f"Direction: {direction_emoji} <b>{html.escape(signal.direction)}</b>\n"
+        f"\U0001F3AF <b>SPOT TRADE SETUP: {html.escape(signal.symbol)}</b>\n\n"
+        f"Direction: {direction_emoji} <b>{html.escape(direction_label)}</b>\n"
         f"Confidence: {signal.confidence:.0%} | "
         f"Confluence: {signal.confluence_count} factors {_trade_confluence_stars(signal.confluence_count)}\n\n"
-        f"<b>Entry zone:</b> {_format_trade_price(signal.entry_low)} - {_format_trade_price(signal.entry_high)}\n"
-        f"<b>Stop loss:</b> {_format_trade_price(signal.stop_loss)} (-{signal.stop_loss_pct:.1f}%)\n"
-        f"<b>Risk per unit:</b> {_format_trade_price(signal.risk_per_unit)}\n\n"
-        f"<b>Take profit:</b>\n"
-        f"TP1: {_format_trade_price(signal.tp1)} (+{signal.tp1_pct:.1f}%) - take 1/3 off\n"
-        f"TP2: {_format_trade_price(signal.tp2)} (+{signal.tp2_pct:.1f}%) - take 1/3, move SL to breakeven\n"
-        f"TP3: {_format_trade_price(signal.tp3)} (+{signal.tp3_pct:.1f}%) - trail the rest\n\n"
+        f"{spot_note}"
+        f"<b>{zone_label}:</b> {_format_trade_price(signal.entry_low)} - {_format_trade_price(signal.entry_high)}\n"
+        f"<b>{stop_label}:</b> {_format_trade_price(signal.stop_loss)} ({stop_pct})\n"
+        f"<b>{risk_label}:</b> {_format_trade_price(signal.risk_per_unit)}\n\n"
+        f"<b>{'Take-profit sell targets' if is_long else 'Downside checkpoints'}:</b>\n"
+        f"TP1: {_format_trade_price(signal.tp1)} ({_trade_target_pct(signal.direction, signal.tp1_pct)})"
+        f"{' - sell 1/3' if is_long else ' - first support'}\n"
+        f"TP2: {_format_trade_price(signal.tp2)} ({_trade_target_pct(signal.direction, signal.tp2_pct)})"
+        f"{' - sell another 1/3' if is_long else ' - deeper support'}\n"
+        f"TP3: {_format_trade_price(signal.tp3)} ({_trade_target_pct(signal.direction, signal.tp3_pct)})"
+        f"{' - trail the rest' if is_long else ' - stretch target if weakness accelerates'}\n\n"
         f"<b>R:R:</b> 1:{signal.risk_reward} | <b>Timeframe:</b> {html.escape(signal.timeframe)}\n"
         f"<b>Suggested risk:</b> {signal.suggested_risk_pct:.0f}% of portfolio\n\n"
         f"<b>Why this trade:</b>\n{confluence_lines}\n\n"
         f"{html.escape(signal.manipulation_check, quote=False)}\n\n"
-        f"<b>Execution plan:</b>\n"
-        f"1. Enter 1/3 size at {_format_trade_price(signal.entry_low)}\n"
-        f"2. Add 1/3 on confirmation if price holds in the entry zone\n"
-        f"3. Add the final 1/3 if momentum expands in your favor\n"
-        f"4. Take profit in thirds at TP1, TP2, and TP3\n"
-        f"5. Move SL to breakeven after TP1 is hit\n\n"
-        "<b>NOT financial advice.</b> Every trade can lose 100% of risked capital.\n"
-        "Close dead-money trades that do not move in 5-7 days."
+        f"{_format_spot_position_sizing_text(signal)}\n\n"
+        f"{_format_spot_execution_text(signal)}\n\n"
+        "<b>NOT financial advice.</b> Risk no more than 2% of your portfolio per trade idea."
+    )
+
+
+def _format_spot_position_sizing_text(signal: TradeSignal) -> str:
+    portfolio_example = 1_000.0
+    risk_pct = signal.suggested_risk_pct / 100
+    max_risk_amount = portfolio_example * risk_pct
+    units = max_risk_amount / signal.risk_per_unit if signal.risk_per_unit > 0 else 0.0
+
+    if signal.direction == "LONG":
+        return (
+            "<b>Position sizing example (£1,000 portfolio):</b>\n"
+            f"Max risk ({signal.suggested_risk_pct:.0f}%): £{max_risk_amount:.2f}\n"
+            f"Position size: {units:.4f} {html.escape(signal.symbol)}\n"
+            f"Approx notional at entry: {_format_trade_price(units * signal.entry_high)}\n"
+            f"If stopped out, you lose: £{max_risk_amount:.2f}\n"
+            f"If TP2 hits, you gain: ~£{units * abs(signal.tp2 - signal.entry_high):.2f}"
+        )
+
+    return (
+        "<b>Position sizing example (£1,000 portfolio):</b>\n"
+        f"Max giveback to tolerate ({signal.suggested_risk_pct:.0f}%): £{max_risk_amount:.2f}\n"
+        f"Spot size to cap that giveback: {units:.4f} {html.escape(signal.symbol)}\n"
+        f"Approx spot value near the sell zone: {_format_trade_price(units * signal.entry_low)}\n"
+        f"If price invalidates above {_format_trade_price(signal.stop_loss)}, giveback is about £{max_risk_amount:.2f}\n"
+        f"If TP2 hits, you avoid roughly £{units * abs(signal.stop_loss - signal.tp2):.2f} of extra downside"
+    )
+
+
+def _format_spot_execution_text(signal: TradeSignal) -> str:
+    if signal.direction == "LONG":
+        return (
+            "<b>How to execute (spot):</b>\n"
+            f"1. Place a limit buy at {_format_trade_price(signal.entry_low)}\n"
+            f"2. Set a stop-loss sell at {_format_trade_price(signal.stop_loss)}\n"
+            f"3. When TP1 ({_format_trade_price(signal.tp1)}) hits, sell 1/3 of your position\n"
+            "4. Move the stop-loss to your entry price (breakeven)\n"
+            f"5. When TP2 ({_format_trade_price(signal.tp2)}) hits, sell another 1/3\n"
+            "6. Let the last 1/3 ride with a trailing stop\n"
+            "7. If nothing happens in 5-7 days, close the trade"
+        )
+
+    return (
+        "<b>How to execute (spot):</b>\n"
+        "1. Treat this as a bearish spot plan, not a fresh buy setup\n"
+        f"2. If you already hold the coin, reduce into {_format_trade_price(signal.entry_low)} - {_format_trade_price(signal.entry_high)}\n"
+        f"3. Keep a protective stop on any remaining spot at {_format_trade_price(signal.stop_loss)}\n"
+        f"4. If price drops to TP1 ({_format_trade_price(signal.tp1)}), reduce another 1/3\n"
+        f"5. If TP2 ({_format_trade_price(signal.tp2)}) hits, reduce again or wait for a base to form\n"
+        f"6. Re-enter only if price reclaims {_format_trade_price(signal.stop_loss)} with strength\n"
+        "7. If price stalls for 5-7 days, stay patient and reassess"
     )
 
 
@@ -1632,6 +1773,11 @@ def _format_trade_price(value: float) -> str:
 def _trade_confluence_stars(count: int) -> str:
     filled = max(0, min(5, count))
     return ("*" * filled) + ("." * (5 - filled))
+
+
+def _trade_target_pct(direction: str, pct: float) -> str:
+    sign = "+" if direction.upper() == "LONG" else "-"
+    return f"{sign}{pct:.1f}%"
 
 
 def _trade_direction_to_prediction(direction: str) -> str:

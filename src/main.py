@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-# Fix Windows console encoding for emoji support.
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
@@ -18,23 +17,24 @@ if sys.platform == "win32":
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Defaults
 
-from src.alerts import AlertPipeline, binance_ws_loop, finnhub_ws_loop
+from src.alerts import AlertPipeline, binance_ws_loop
 from src.bot.handlers import (
     accuracy_command,
     add_command,
-    analyze_command,
     alerts_command,
+    analyze_command,
     briefing_command,
     corr_command,
     events_command,
     handle_asset_type_callback,
     help_command,
+    history_command,
     playbook_command,
-    regime_command,
     reflect_command,
+    regime_command,
     remove_command,
-    signals_command,
     sentiment_command,
+    signals_command,
     start_command,
     status_command,
     ta_command,
@@ -42,7 +42,7 @@ from src.bot.handlers import (
     trades_command,
     watchlist_command,
 )
-from src.bot.scheduler import setup_scheduler
+from src.bot.scheduler import _schedule_trade_scans, setup_scheduler
 from src.briefing.formatter import BriefingFormatter
 from src.config import settings
 from src.data.aggregator import DataAggregator
@@ -92,6 +92,7 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     await _seed_alert_reference_prices(application)
     await _start_alert_streams(application)
     await setup_scheduler(application)
+    await _schedule_trade_scans(application)
     logger.info("AlphaRadar initialized successfully")
 
 
@@ -102,7 +103,9 @@ async def post_shutdown(application: Application[Any, Any, Any, Any, Any, Any]) 
     logger.info("AlphaRadar shutdown complete")
 
 
-async def _seed_alert_reference_prices(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+async def _seed_alert_reference_prices(
+    application: Application[Any, Any, Any, Any, Any, Any],
+) -> None:
     aggregator = application.bot_data.get("aggregator")
     pipeline = application.bot_data.get("alert_pipeline")
     if not isinstance(aggregator, DataAggregator) or not isinstance(pipeline, AlertPipeline):
@@ -130,33 +133,18 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
     aggregator = application.bot_data.get("aggregator")
     pipeline = application.bot_data.get("alert_pipeline")
     db = application.bot_data.get("db")
-    if not isinstance(aggregator, DataAggregator) or not isinstance(pipeline, AlertPipeline) or not isinstance(db, Database):
+    if (
+        not isinstance(aggregator, DataAggregator)
+        or not isinstance(pipeline, AlertPipeline)
+        or not isinstance(db, Database)
+    ):
         return
 
     watchlist = await db.get_watchlist()
-    stock_symbols = [item.symbol for item in watchlist if item.asset_type == "stock"]
     crypto_symbols = [item.symbol for item in watchlist if item.asset_type == "crypto"]
-    chat_id: int | str = int(settings.telegram_chat_id) if settings.telegram_chat_id.isdigit() else settings.telegram_chat_id
-    ws_tasks: dict[str, asyncio.Task[object] | None] = {
-        "finnhub": None,
-        "binance": None,
-    }
+    chat_id = _telegram_chat_id()
+    ws_tasks: dict[str, asyncio.Task[object] | None] = {"binance": None}
     application.bot_data["ws_tasks"] = ws_tasks
-
-    async def on_stock_trade(symbol: str, price: float, volume: int) -> None:
-        del volume
-        alert = pipeline.classify_severity(symbol, price, "stock")
-        if alert is None:
-            return
-        pipeline.record_sent(alert)
-        try:
-            await application.bot.send_message(
-                chat_id=chat_id,
-                text=f"🚨 <b>STOCK ALERT</b> [{alert.severity.value.upper()}]\n\n{alert.message}",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            logger.exception("Failed to send stock alert for %s", symbol.upper())
 
     async def on_crypto_price(symbol: str, price: float) -> None:
         alert = pipeline.classify_severity(symbol, price, "crypto")
@@ -172,13 +160,6 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
         except Exception:
             logger.exception("Failed to send crypto alert for %s", symbol.upper())
 
-    finnhub_key = settings.finnhub_api_key.get_secret_value()
-    if finnhub_key and stock_symbols:
-        ws_tasks["finnhub"] = application.create_task(
-            finnhub_ws_loop(finnhub_key, stock_symbols, on_stock_trade),
-            name="finnhub_ws",
-        )
-
     if crypto_symbols:
         ws_tasks["binance"] = application.create_task(
             binance_ws_loop(crypto_symbols, on_crypto_price),
@@ -186,9 +167,17 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
         )
 
 
+def _telegram_chat_id() -> int | str:
+    try:
+        return int(settings.telegram_chat_id)
+    except ValueError:
+        return settings.telegram_chat_id
+
+
 async def error_handler(update: object, context: Any) -> None:
     import traceback
 
+    del update
     print(f"ERROR: {context.error}")
     traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
 
@@ -209,6 +198,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("briefing", briefing_command))
+    application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("playbook", playbook_command))
     application.add_handler(CommandHandler("events", events_command))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import html
 import logging
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,7 +12,10 @@ from src.alerts import AlertPipeline, AlertSeverity
 from src.bot.messages import _send_long_message
 from src.config import settings
 from src.data.aggregator import DataAggregator
+from src.briefing.models import BriefingData
+from src.events.models import DetectedEvent
 from src.storage.database import Database
+from src.trade import TradeSignal, generate_crypto_trade_signal
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +155,209 @@ async def _first_briefing_then_repeat(context: ContextTypes.DEFAULT_TYPE) -> Non
             name="daily_briefing_fallback",
             data={"tz": settings.timezone},
         )
+
+
+async def _schedule_trade_scans(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
+    """Schedule the twice-daily crypto trade scans at 7 AM and 7 PM London."""
+    job_queue = application.job_queue
+    if job_queue is None:
+        raise RuntimeError(
+            "Job queue is not available. "
+            "Install python-telegram-bot with: pip install 'python-telegram-bot[job-queue]'"
+        )
+
+    for hour in (7, 19):
+        _schedule_trade_scan_job(job_queue, hour=hour, minute=0)
+
+
+async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the crypto trade scan and notify only when actionable setups exist."""
+    job_data = context.job.data if context.job is not None and isinstance(context.job.data, dict) else {}
+    hour = int(job_data.get("hour", 7))
+    minute = int(job_data.get("minute", 0))
+
+    logger.info("Running auto trade scan for %02d:%02d Europe/London", hour, minute)
+
+    try:
+        aggregator = context.bot_data.get("aggregator")
+        if not isinstance(aggregator, DataAggregator):
+            logger.error("Auto trade scan dependencies missing in bot_data")
+            return
+
+        data = await aggregator.gather_briefing_data(include_agent_analysis=True)
+        _cache_briefing_snapshot(context, data)
+
+        regime_key = (
+            data.regime_state.regime.value
+            if data.regime_state is not None
+            else "default"
+        )
+        btc_change = _btc_change_pct(data)
+        signals: list[TradeSignal] = []
+
+        for price_item in data.crypto_prices:
+            symbol = price_item.symbol.upper()
+            signal = generate_crypto_trade_signal(
+                symbol=symbol,
+                current_price=price_item.current_price,
+                ta_signal=data.ta_signals.get(symbol),
+                composite=data.composite_scores.get(symbol),
+                verdict=_verdict_for_symbol(data, symbol),
+                event_data=_event_payload_for_symbol(data, symbol),
+                regime=regime_key,
+                btc_change_pct=btc_change,
+            )
+            if signal is not None:
+                signals.append(signal)
+
+        if not signals:
+            logger.info("Auto trade scan: no setups found, staying silent")
+            return
+
+        signals.sort(key=lambda item: item.confidence, reverse=True)
+
+        tracker = context.bot_data.get("tracker")
+        if tracker is not None:
+            for signal in signals:
+                await tracker.log_prediction(
+                    symbol=signal.symbol,
+                    asset_type="crypto",
+                    predicted_direction="bullish" if signal.direction == "LONG" else "bearish",
+                    confidence=signal.confidence,
+                    price_at_prediction=signal.entry_high,
+                    source="auto_trade_scan",
+                    reasoning=signal.reasoning,
+                    predicted_target=signal.tp2,
+                )
+
+        time_label = "MORNING" if hour < 12 else "EVENING"
+        lines = [f"🎯 <b>{time_label} TRADE SCAN</b>  {len(signals)} setup(s) found", ""]
+        for signal in signals[:5]:
+            direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
+            lines.append(
+                f"{direction_emoji} <b>{html.escape(signal.symbol)}</b> "
+                f"{html.escape(signal.direction if signal.direction == 'LONG' else 'SHORT BIAS')} "
+                f"({signal.confidence:.0%}) {_trade_scan_stars(signal.confluence_count)}".rstrip()
+            )
+            lines.append(
+                f"   Entry: {_format_trade_scan_price(signal.entry_low)} - "
+                f"{_format_trade_scan_price(signal.entry_high)}"
+            )
+            lines.append(
+                f"   SL: {_format_trade_scan_price(signal.stop_loss)} | "
+                f"TP1: {_format_trade_scan_price(signal.tp1)} | "
+                f"TP2: {_format_trade_scan_price(signal.tp2)}"
+            )
+            lines.append(
+                f"   R:R 1:{signal.risk_reward} | {html.escape(signal.timeframe)} | "
+                f"Risk: {signal.suggested_risk_pct:.0f}%"
+            )
+            lines.append("")
+
+        lines.append("Use /trade &lt;SYMBOL&gt; for full spot execution details.")
+        lines.append("")
+        lines.append("Not financial advice. Max 2% risk per trade.")
+
+        await context.bot.send_message(
+            chat_id=int(settings.telegram_chat_id),
+            text="\n".join(lines),
+            parse_mode="HTML",
+        )
+        logger.info("Auto trade scan: sent %d signal(s)", len(signals))
+    except Exception:
+        logger.exception("Auto trade scan failed")
+    finally:
+        if context.job_queue is not None:
+            _schedule_trade_scan_job(context.job_queue, hour=hour, minute=minute)
+
+
+def _schedule_trade_scan_job(job_queue: object, *, hour: int, minute: int) -> None:
+    if not hasattr(job_queue, "run_once"):
+        raise RuntimeError("Job queue does not support run_once scheduling")
+
+    tz = ZoneInfo("Europe/London")
+    now = datetime.datetime.now(tz)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+
+    seconds_until = (target - now).total_seconds()
+    logger.info(
+        "Scheduled trade scan at %s (in %.0f seconds)",
+        target.strftime("%Y-%m-%d %H:%M %Z"),
+        seconds_until,
+    )
+    job_queue.run_once(
+        auto_trade_scan,
+        when=seconds_until,
+        name=f"trade_scan_{hour:02d}_{minute:02d}",
+        data={"hour": hour, "minute": minute},
+    )
+
+
+def _cache_briefing_snapshot(context: ContextTypes.DEFAULT_TYPE, data: BriefingData) -> None:
+    context.bot_data["latest_briefing_data"] = data
+    context.bot_data["current_regime"] = data.regime_state
+    context.bot_data["composite_scores"] = data.composite_scores
+    context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
+    context.bot_data["ta_signals"] = data.ta_signals
+    context.bot_data["agent_analysis"] = data.agent_analysis
+
+
+def _btc_change_pct(data: BriefingData) -> float:
+    for item in data.crypto_prices:
+        if item.symbol.upper() == "BTC":
+            return item.change_24h_pct
+    return 0.0
+
+
+def _verdict_for_symbol(data: BriefingData, symbol: str) -> object | None:
+    analysis = data.agent_analysis
+    if analysis is None:
+        return None
+    symbol_upper = symbol.upper()
+    for verdict in analysis.debate_verdicts:
+        if verdict.symbol.upper() == symbol_upper:
+            return verdict
+    return None
+
+
+def _event_payload_for_symbol(data: BriefingData, symbol: str) -> dict[str, object] | None:
+    event = _event_for_symbol(data, symbol)
+    if event is None:
+        return None
+    return {
+        "event_type": event.event_type.value,
+        "remaining_drift_pct": event.remaining_drift_pct,
+        "expected_car_pct": event.expected_car_pct,
+    }
+
+
+def _event_for_symbol(data: BriefingData, symbol: str) -> DetectedEvent | None:
+    symbol_upper = symbol.upper()
+    best_event: DetectedEvent | None = None
+    best_score = -1.0
+    for event in data.event_data:
+        if symbol_upper not in {related.upper() for related in event.related_symbols}:
+            continue
+        score = abs(event.remaining_drift_pct or event.expected_car_pct or 0.0) * event.confidence
+        if score > best_score:
+            best_event = event
+            best_score = score
+    return best_event
+
+
+def _format_trade_scan_price(value: float) -> str:
+    if value >= 100:
+        return f"${value:,.2f}"
+    if value >= 1:
+        return f"${value:.2f}"
+    return f"${value:.4f}"
+
+
+def _trade_scan_stars(count: int) -> str:
+    filled = max(0, min(5, count))
+    return ("*" * filled) + ("." * (5 - filled))
 
 
 async def send_scheduled_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
