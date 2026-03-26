@@ -11,6 +11,32 @@ from src.ta.signals import TASignal
 
 logger = logging.getLogger(__name__)
 
+SPOT_TP_CAPS = {
+    "tp1_max_pct": 5.0,
+    "tp2_max_pct": 10.0,
+    "tp3_max_pct": 18.0,
+}
+
+BTC_TP_CAPS = {
+    "tp1_max_pct": 3.0,
+    "tp2_max_pct": 6.0,
+    "tp3_max_pct": 10.0,
+}
+
+SPOT_SL_CAPS = {
+    "sl_max_pct": 8.0,
+}
+
+STOCK_TP_CAPS = {
+    "tp1_max_pct": 3.0,
+    "tp2_max_pct": 6.0,
+    "tp3_max_pct": 10.0,
+}
+
+STOCK_SL_CAPS = {
+    "sl_max_pct": 5.0,
+}
+
 
 @dataclass(slots=True)
 class ConfluenceFactor:
@@ -90,6 +116,7 @@ def generate_trade_signal(
         else current_price * 0.03
     )
     sl_distance = max(atr_value * 1.5, current_price * 0.015)
+    sl_distance = min(sl_distance, current_price * (STOCK_SL_CAPS["sl_max_pct"] / 100))
 
     if direction == "LONG":
         entry_high = current_price
@@ -134,6 +161,25 @@ def generate_trade_signal(
 
     entry_reference = entry_high if direction == "LONG" else entry_low
     tp1, tp2, tp3 = _normalize_targets(direction, entry_reference, sl_distance, tp1, tp2, tp3)
+    tp1, tp2, tp3, stop_loss = _cap_stock_targets(
+        symbol=symbol,
+        current_price=current_price,
+        direction=direction,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        stop_loss=stop_loss,
+    )
+    entry_low, entry_high = _rebuild_entry_zone(
+        current_price=current_price,
+        stop_loss=stop_loss,
+        direction=direction,
+    )
+    entry_reference = _entry_reference_from_zone(
+        direction=direction,
+        entry_low=entry_low,
+        entry_high=entry_high,
+    )
 
     risk = abs(entry_reference - stop_loss)
     reward = abs(tp2 - entry_reference)
@@ -151,10 +197,10 @@ def generate_trade_signal(
     else:
         timeframe = "1-2 weeks"
 
-    stop_loss_pct = (risk / entry_reference) * 100 if entry_reference > 0 else 0.0
-    tp1_pct = (abs(tp1 - entry_reference) / entry_reference) * 100 if entry_reference > 0 else 0.0
-    tp2_pct = (abs(tp2 - entry_reference) / entry_reference) * 100 if entry_reference > 0 else 0.0
-    tp3_pct = (abs(tp3 - entry_reference) / entry_reference) * 100 if entry_reference > 0 else 0.0
+    stop_loss_pct = (abs(current_price - stop_loss) / current_price) * 100 if current_price > 0 else 0.0
+    tp1_pct = (abs(tp1 - current_price) / current_price) * 100 if current_price > 0 else 0.0
+    tp2_pct = (abs(tp2 - current_price) / current_price) * 100 if current_price > 0 else 0.0
+    tp3_pct = (abs(tp3 - current_price) / current_price) * 100 if current_price > 0 else 0.0
 
     return TradeSignal(
         symbol=symbol.upper(),
@@ -457,6 +503,7 @@ def generate_crypto_trade_signal(
 
     atr_multiplier = 2.5 if atr_pct > 6 else 2.0
     sl_distance = atr * atr_multiplier
+    sl_distance = min(sl_distance, current_price * (SPOT_SL_CAPS["sl_max_pct"] / 100))
 
     if direction == "LONG":
         entry_high = current_price
@@ -499,6 +546,25 @@ def generate_crypto_trade_signal(
 
     entry_reference = current_price
     tp1, tp2, tp3 = _normalize_targets(direction, entry_reference, sl_distance, tp1, tp2, tp3)
+    tp1, tp2, tp3, stop_loss = _cap_spot_targets(
+        symbol=symbol,
+        current_price=current_price,
+        direction=direction,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        stop_loss=stop_loss,
+    )
+    entry_low, entry_high = _rebuild_entry_zone(
+        current_price=current_price,
+        stop_loss=stop_loss,
+        direction=direction,
+    )
+    entry_reference = _entry_reference_from_zone(
+        direction=direction,
+        entry_low=entry_low,
+        entry_high=entry_high,
+    )
     risk = abs(entry_reference - stop_loss)
     reward = abs(tp2 - entry_reference)
     if risk <= 0:
@@ -520,10 +586,10 @@ def generate_crypto_trade_signal(
         0.90,
         0.40 + (len(active_factors) * 0.08) + (sum(f.strength for f in active_factors) * 0.05),
     )
-    stop_loss_pct = abs(entry_reference - stop_loss) / entry_reference * 100
-    tp1_pct = abs(tp1 - entry_reference) / entry_reference * 100
-    tp2_pct = abs(tp2 - entry_reference) / entry_reference * 100
-    tp3_pct = abs(tp3 - entry_reference) / entry_reference * 100
+    stop_loss_pct = abs(current_price - stop_loss) / current_price * 100
+    tp1_pct = abs(tp1 - current_price) / current_price * 100
+    tp2_pct = abs(tp2 - current_price) / current_price * 100
+    tp3_pct = abs(tp3 - current_price) / current_price * 100
     manipulation = _check_manipulation_v2(ta_signal, composite, regime, factors)
 
     top_reasons = sorted(active_factors, key=lambda factor: factor.strength, reverse=True)[:3]
@@ -556,6 +622,99 @@ def generate_crypto_trade_signal(
         confluence_factors=sorted(active_factors, key=lambda factor: factor.strength, reverse=True),
         suggested_risk_pct=suggested_risk_pct,
     )
+
+
+def _cap_spot_targets(
+    *,
+    symbol: str,
+    current_price: float,
+    direction: str,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    stop_loss: float,
+) -> tuple[float, float, float, float]:
+    caps = BTC_TP_CAPS if symbol.upper() == "BTC" else SPOT_TP_CAPS
+    return _cap_targets(
+        current_price=current_price,
+        direction=direction,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        stop_loss=stop_loss,
+        tp_caps=caps,
+        sl_max_pct=SPOT_SL_CAPS["sl_max_pct"],
+    )
+
+
+def _cap_stock_targets(
+    *,
+    symbol: str,
+    current_price: float,
+    direction: str,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    stop_loss: float,
+) -> tuple[float, float, float, float]:
+    del symbol
+    return _cap_targets(
+        current_price=current_price,
+        direction=direction,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        stop_loss=stop_loss,
+        tp_caps=STOCK_TP_CAPS,
+        sl_max_pct=STOCK_SL_CAPS["sl_max_pct"],
+    )
+
+
+def _cap_targets(
+    *,
+    current_price: float,
+    direction: str,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    stop_loss: float,
+    tp_caps: Mapping[str, float],
+    sl_max_pct: float,
+) -> tuple[float, float, float, float]:
+    if direction == "LONG":
+        tp1 = min(tp1, current_price * (1 + tp_caps["tp1_max_pct"] / 100))
+        tp2 = min(tp2, current_price * (1 + tp_caps["tp2_max_pct"] / 100))
+        tp3 = min(tp3, current_price * (1 + tp_caps["tp3_max_pct"] / 100))
+        stop_loss = max(stop_loss, current_price * (1 - sl_max_pct / 100))
+        return tp1, tp2, tp3, stop_loss
+
+    tp1 = max(tp1, current_price * (1 - tp_caps["tp1_max_pct"] / 100))
+    tp2 = max(tp2, current_price * (1 - tp_caps["tp2_max_pct"] / 100))
+    tp3 = max(tp3, current_price * (1 - tp_caps["tp3_max_pct"] / 100))
+    stop_loss = min(stop_loss, current_price * (1 + sl_max_pct / 100))
+    return tp1, tp2, tp3, stop_loss
+
+
+def _rebuild_entry_zone(
+    *,
+    current_price: float,
+    stop_loss: float,
+    direction: str,
+) -> tuple[float, float]:
+    risk_distance = abs(current_price - stop_loss)
+    entry_buffer = risk_distance * 0.1
+    if direction == "LONG":
+        return max(current_price - entry_buffer, 0.0000001), current_price
+    return current_price, current_price + entry_buffer
+
+
+def _entry_reference_from_zone(
+    *,
+    direction: str,
+    entry_low: float,
+    entry_high: float,
+) -> float:
+    return entry_low if direction == "LONG" else entry_high
 
 
 def _has_strong_ta_conflict(direction: str, ta_signal: TASignal | None) -> bool:

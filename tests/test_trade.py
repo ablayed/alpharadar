@@ -3,7 +3,16 @@ from __future__ import annotations
 from src.agents.state import DebateVerdict
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
-from src.trade.generator import generate_crypto_trade_signal, generate_trade_signal
+from src.trade.generator import (
+    BTC_TP_CAPS,
+    SPOT_SL_CAPS,
+    SPOT_TP_CAPS,
+    STOCK_SL_CAPS,
+    STOCK_TP_CAPS,
+    _cap_spot_targets,
+    generate_crypto_trade_signal,
+    generate_trade_signal,
+)
 
 
 def _ta_signal(
@@ -93,7 +102,14 @@ def test_generate_trade_signal_builds_stock_setup() -> None:
     signal = generate_trade_signal(
         symbol="NVDA",
         current_price=100.0,
-        ta_signal=_ta_signal(symbol="NVDA"),
+        ta_signal=_ta_signal(
+            symbol="NVDA",
+            current_price=100.0,
+            atr_value=2.0,
+            atr_pct=2.0,
+            bb_upper=108.0,
+            bb_lower=97.0,
+        ),
         composite=_composite(symbol="NVDA"),
         verdict=_verdict(symbol="NVDA"),
         event_data={"event_type": "analyst_upgrade", "remaining_drift_pct": 6.0},
@@ -104,6 +120,8 @@ def test_generate_trade_signal_builds_stock_setup() -> None:
     assert signal.direction == "LONG"
     assert signal.tp1 < signal.tp2 < signal.tp3
     assert signal.risk_reward >= 1.5
+    assert signal.tp3_pct <= STOCK_TP_CAPS["tp3_max_pct"] + 0.1
+    assert signal.stop_loss_pct <= STOCK_SL_CAPS["sl_max_pct"] + 0.1
 
 
 def test_generate_crypto_trade_signal_requires_three_confluence_factors() -> None:
@@ -177,6 +195,122 @@ def test_generate_crypto_trade_signal_builds_high_confluence_long_setup() -> Non
     assert signal.tp1 < signal.tp2 < signal.tp3
     assert signal.risk_reward >= 1.5
     assert len(signal.confluence_factors) == signal.confluence_count
+
+
+def test_tp_caps_prevent_unrealistic_targets() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=2_100.0,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=2_100.0,
+            atr_value=60.0,
+            atr_pct=2.9,
+            bb_upper=2_700.0,
+            bb_lower=1_980.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.74,
+            rsi_signal="oversold",
+            rsi_value=29.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.32,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.23,
+            agreement=0.79,
+            direction="buy",
+            breakdown={"sentiment": 0.09, "ta": 0.08, "event": 0.04},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bullish", confidence=0.82),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 7.5},
+        regime="risk_on",
+        btc_change_pct=2.7,
+    )
+
+    assert signal is not None
+    assert signal.tp1_pct <= SPOT_TP_CAPS["tp1_max_pct"] + 0.1
+    assert signal.tp2_pct <= SPOT_TP_CAPS["tp2_max_pct"] + 0.1
+    assert signal.tp3_pct <= SPOT_TP_CAPS["tp3_max_pct"] + 0.1
+
+
+def test_btc_has_tighter_caps() -> None:
+    btc_tp1, btc_tp2, btc_tp3, btc_stop = _cap_spot_targets(
+        symbol="BTC",
+        current_price=100.0,
+        direction="LONG",
+        tp1=112.0,
+        tp2=125.0,
+        tp3=140.0,
+        stop_loss=86.0,
+    )
+    alt_tp1, alt_tp2, alt_tp3, alt_stop = _cap_spot_targets(
+        symbol="ETH",
+        current_price=100.0,
+        direction="LONG",
+        tp1=112.0,
+        tp2=125.0,
+        tp3=140.0,
+        stop_loss=86.0,
+    )
+
+    assert btc_tp1 == 100.0 * (1 + BTC_TP_CAPS["tp1_max_pct"] / 100)
+    assert btc_tp2 == 100.0 * (1 + BTC_TP_CAPS["tp2_max_pct"] / 100)
+    assert btc_tp3 == 100.0 * (1 + BTC_TP_CAPS["tp3_max_pct"] / 100)
+    assert btc_tp1 < alt_tp1
+    assert btc_tp2 < alt_tp2
+    assert btc_tp3 < alt_tp3
+    assert btc_stop == alt_stop == 100.0 * (1 - SPOT_SL_CAPS["sl_max_pct"] / 100)
+
+
+def test_sl_never_exceeds_8_percent() -> None:
+    _tp1, _tp2, _tp3, stop_loss = _cap_spot_targets(
+        symbol="SOL",
+        current_price=100.0,
+        direction="LONG",
+        tp1=104.0,
+        tp2=109.0,
+        tp3=117.0,
+        stop_loss=72.0,
+    )
+
+    assert stop_loss == 100.0 * (1 - SPOT_SL_CAPS["sl_max_pct"] / 100)
+
+
+def test_rr_still_enforced_after_capping() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="BTC",
+        current_price=100.0,
+        ta_signal=_ta_signal(
+            symbol="BTC",
+            current_price=100.0,
+            atr_value=4.0,
+            atr_pct=4.0,
+            bb_upper=135.0,
+            bb_lower=92.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.75,
+            rsi_signal="oversold",
+            rsi_value=28.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.4,
+        ),
+        composite=_composite(
+            symbol="BTC",
+            score=0.24,
+            agreement=0.8,
+            direction="buy",
+            breakdown={"sentiment": 0.1, "ta": 0.08, "event": 0.04},
+        ),
+        verdict=_verdict(symbol="BTC", prevailing_view="bullish", confidence=0.82),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 6.0},
+        regime="risk_on",
+        btc_change_pct=3.0,
+    )
+
+    assert signal is None
 
 
 def test_generate_crypto_trade_signal_blocks_risk_off_long_without_five_factors() -> None:
