@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import numpy as np
+
 from src.agents.state import DebateVerdict
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
@@ -32,6 +34,11 @@ def _ta_signal(
     rsi_value: float = 52.0,
     macd_signal: str = "bullish",
     macd_histogram: float = 0.2,
+    close: np.ndarray | None = None,
+    high: np.ndarray | None = None,
+    low: np.ndarray | None = None,
+    volume: np.ndarray | None = None,
+    open_: np.ndarray | None = None,
 ) -> TASignal:
     return TASignal(
         symbol=symbol,
@@ -56,6 +63,11 @@ def _ta_signal(
         overall_signal=overall_signal,
         confidence=confidence,
         summary="test",
+        _close=close,
+        _high=high,
+        _low=low,
+        _volume=volume,
+        _open=open_,
     )
 
 
@@ -96,6 +108,95 @@ def _verdict(
         key_risk="test",
         action_context="test",
     )
+
+
+def _fib_raw_series() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    close = np.array(
+        [
+            98.0,
+            97.0,
+            96.0,
+            95.0,
+            96.0,
+            97.0,
+            96.0,
+            95.0,
+            96.0,
+            97.0,
+            98.0,
+            99.0,
+            100.0,
+            99.0,
+            98.0,
+            97.0,
+            96.0,
+            95.0,
+            96.0,
+            97.0,
+            98.0,
+            99.0,
+            100.0,
+            99.0,
+            98.0,
+            97.0,
+            98.0,
+            99.0,
+            99.5,
+            100.0,
+        ],
+        dtype=np.float64,
+    )
+    high = close + 1.0
+    low = close - 1.0
+    volume = np.full_like(close, 10.0)
+    open_ = close - 0.5
+    return close, high, low, volume, open_
+
+
+def _factor_raw_series() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    close = np.array(
+        [
+            120.0,
+            118.0,
+            116.0,
+            114.0,
+            112.0,
+            110.0,
+            108.0,
+            106.0,
+            104.0,
+            102.0,
+            100.0,
+            98.0,
+            96.0,
+            94.0,
+            95.0,
+            96.0,
+            97.0,
+            98.0,
+            99.0,
+            100.0,
+            101.0,
+            102.0,
+            103.0,
+            104.0,
+            105.0,
+            104.0,
+            103.0,
+            93.0,
+            94.0,
+            94.5,
+        ],
+        dtype=np.float64,
+    )
+    high = close + 1.0
+    low = close - 1.0
+    low[-1] = 91.0
+    volume = np.array(([100.0] * 9) + ([10.0] * 7) + ([1.0] * 13) + [6.0], dtype=np.float64)
+    open_ = close - 0.5
+    open_[-1] = 94.0
+    high[-1] = 95.0
+    return close, high, low, volume, open_
 
 
 def test_generate_trade_signal_builds_stock_setup() -> None:
@@ -421,3 +522,94 @@ def test_generate_crypto_trade_signal_sets_high_vol_risk_and_flags_manipulation(
     assert "Breakout from squeeze" in signal.manipulation_check
     assert "Strong signals conflicting" in signal.manipulation_check
     assert "Volatile regime" in signal.manipulation_check
+
+
+def test_generate_crypto_trade_signal_uses_fibonacci_targets_and_hybrid_stop() -> None:
+    close, high, low, volume, open_ = _fib_raw_series()
+
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=100.0,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=100.0,
+            atr_value=1.0,
+            atr_pct=1.0,
+            bb_upper=110.0,
+            bb_lower=95.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.75,
+            rsi_signal="oversold",
+            rsi_value=29.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.3,
+            close=close,
+            high=high,
+            low=low,
+            volume=volume,
+            open_=open_,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.24,
+            agreement=0.8,
+            direction="buy",
+            breakdown={"sentiment": 0.1, "ta": 0.08, "event": 0.04},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bullish", confidence=0.82),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 4.0},
+        regime="risk_on",
+        btc_change_pct=2.5,
+    )
+
+    assert signal is not None
+    assert signal.stop_loss == 98.0
+    assert signal.tp1 < 103.0
+    assert signal.tp2 <= 105.0
+
+
+def test_generate_crypto_trade_signal_adds_obv_volume_and_stop_hunt_factors() -> None:
+    close, high, low, volume, open_ = _factor_raw_series()
+
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=94.5,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=94.5,
+            atr_value=1.0,
+            atr_pct=1.1,
+            bb_upper=100.0,
+            bb_lower=91.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.78,
+            rsi_signal="oversold",
+            rsi_value=28.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.35,
+            close=close,
+            high=high,
+            low=low,
+            volume=volume,
+            open_=open_,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.25,
+            agreement=0.82,
+            direction="buy",
+            breakdown={"sentiment": 0.1, "ta": 0.08, "event": 0.05},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bullish", confidence=0.83),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 4.5},
+        regime="risk_on",
+        btc_change_pct=2.8,
+    )
+
+    assert signal is not None
+    factor_names = {factor.name for factor in signal.confluence_factors}
+    assert "obv_divergence" in factor_names
+    assert "volume" in factor_names
+    assert "stop_hunt" in factor_names

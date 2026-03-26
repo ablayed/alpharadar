@@ -30,6 +30,7 @@ from src.bot.handlers import (
     help_command,
     history_command,
     playbook_command,
+    portfolio_command,
     reflect_command,
     regime_command,
     remove_command,
@@ -47,6 +48,7 @@ from src.briefing.formatter import BriefingFormatter
 from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.storage.database import Database
+from src.trade import PortfolioTracker
 
 stream_handler = logging.StreamHandler(stream=sys.stdout)
 stream_handler.setLevel(logging.INFO)
@@ -88,6 +90,7 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     application.bot_data["settings"] = settings
     application.bot_data["started_at"] = datetime.now(ZoneInfo(settings.timezone))
     application.bot_data["alert_pipeline"] = AlertPipeline()
+    application.bot_data["portfolio_tracker"] = PortfolioTracker()
 
     await _seed_alert_reference_prices(application)
     await _start_alert_streams(application)
@@ -201,6 +204,7 @@ def main() -> None:
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("playbook", playbook_command))
+    application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("events", events_command))
     application.add_handler(CommandHandler("corr", corr_command))
     application.add_handler(CommandHandler("regime", regime_command))

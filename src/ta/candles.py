@@ -23,7 +23,7 @@ async def fetch_stock_candles(
     days: int = 365,
     *,
     db_path: str | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     now = int(time.time())
     start = now - (days * 86400)
     cache_key = f"ta:finnhub:candles:{symbol.upper()}:{days}"
@@ -73,7 +73,7 @@ async def fetch_crypto_candles(
     days: int = 365,
     *,
     db_path: str | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     cache_key = f"ta:coingecko:candles:{coin_id}:{days}"
     cached = await _get_cached_json(db_path, cache_key)
     if isinstance(cached, list):
@@ -97,27 +97,31 @@ async def fetch_crypto_candles(
 
 def _parse_finnhub_candles(
     payload: Mapping[str, object],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     status = payload.get("s")
+    open_ = payload.get("o")
     close = payload.get("c")
     high = payload.get("h")
     low = payload.get("l")
     volume = payload.get("v")
-    if status != "ok" or not all(isinstance(values, list) for values in (close, high, low, volume)):
+    if status != "ok" or not all(
+        isinstance(values, list) for values in (open_, close, high, low, volume)
+    ):
         return None
 
+    open_array = np.asarray(open_, dtype=np.float64)
     close_array = np.asarray(close, dtype=np.float64)
     high_array = np.asarray(high, dtype=np.float64)
     low_array = np.asarray(low, dtype=np.float64)
     volume_array = np.asarray(volume, dtype=np.float64)
     if len(close_array) < 60:
         return None
-    return close_array, high_array, low_array, volume_array
+    return close_array, high_array, low_array, volume_array, open_array
 
 
 def _parse_coingecko_candles(
     payload: object,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     if not isinstance(payload, list) or len(payload) < 60:
         return None
 
@@ -128,11 +132,12 @@ def _parse_coingecko_candles(
     if array.ndim != 2 or array.shape[1] < 5:
         return None
 
+    open_array = array[:, 1]
     high_array = array[:, 2]
     low_array = array[:, 3]
     close_array = array[:, 4]
     volume_array = np.zeros_like(close_array)
-    return close_array, high_array, low_array, volume_array
+    return close_array, high_array, low_array, volume_array, open_array
 
 
 async def _fetch_yfinance_stock_candles(symbol: str, days: int) -> dict[str, object] | None:
@@ -159,21 +164,24 @@ def _download_yfinance_candles(symbol: str, days: int) -> dict[str, object] | No
         interval="1d",
         auto_adjust=False,
     )
-    required_columns = ("Close", "High", "Low", "Volume")
+    required_columns = ("Open", "Close", "High", "Low", "Volume")
     if history.empty or any(column not in history for column in required_columns):
         return None
 
+    open_array = np.asarray(history["Open"], dtype=np.float64)
     close_array = np.asarray(history["Close"], dtype=np.float64)
     high_array = np.asarray(history["High"], dtype=np.float64)
     low_array = np.asarray(history["Low"], dtype=np.float64)
     volume_array = np.asarray(history["Volume"], dtype=np.float64)
 
     valid_mask = (
-        np.isfinite(close_array)
+        np.isfinite(open_array)
+        & np.isfinite(close_array)
         & np.isfinite(high_array)
         & np.isfinite(low_array)
         & np.isfinite(volume_array)
     )
+    open_array = open_array[valid_mask]
     close_array = close_array[valid_mask]
     high_array = high_array[valid_mask]
     low_array = low_array[valid_mask]
@@ -183,6 +191,7 @@ def _download_yfinance_candles(symbol: str, days: int) -> dict[str, object] | No
         return None
 
     return {
+        "o": open_array.tolist(),
         "c": close_array.tolist(),
         "h": high_array.tolist(),
         "l": low_array.tolist(),

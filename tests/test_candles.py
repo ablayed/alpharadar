@@ -29,6 +29,7 @@ async def test_fetch_stock_candles_falls_back_to_yfinance(monkeypatch) -> None:
     cached_payloads: list[tuple[str, object, int]] = []
     fallback_payload = {
         "s": "ok",
+        "o": [float(99 + idx) for idx in range(80)],
         "c": [float(100 + idx) for idx in range(80)],
         "h": [float(101 + idx) for idx in range(80)],
         "l": [float(99 + idx) for idx in range(80)],
@@ -62,9 +63,11 @@ async def test_fetch_stock_candles_falls_back_to_yfinance(monkeypatch) -> None:
     parsed = await candles.fetch_stock_candles("AAPL", "secret", db_path="data/alpharadar.db")
 
     assert parsed is not None
-    close, high, low, volume = parsed
+    close, high, low, volume, open_ = parsed
     assert len(close) == 80
     assert len(high) == 80
     assert len(low) == 80
     assert len(volume) == 80
+    assert len(open_) == 80
+    assert open_[0] == 99.0
     assert cached_payloads == [("ta:finnhub:candles:AAPL:365", fallback_payload, 21_600)]

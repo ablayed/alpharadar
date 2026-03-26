@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import html
 import logging
+import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,7 +16,7 @@ from src.data.aggregator import DataAggregator
 from src.briefing.models import BriefingData
 from src.events.models import DetectedEvent
 from src.storage.database import Database
-from src.trade import TradeSignal, generate_crypto_trade_signal
+from src.trade import PortfolioTracker, TradeSignal, generate_crypto_trade_signal
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,12 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
         time=datetime.time(hour=23, minute=5, second=0, tzinfo=ZoneInfo("UTC")),
         days=tuple(range(7)),
         name="detect_and_store_regime",
+    )
+    job_queue.run_repeating(
+        callback=check_open_positions,
+        interval=4 * 3600,
+        first=4 * 3600,
+        name="check_open_positions",
     )
 
     next_run = getattr(job, "next_t", None) or getattr(job, "next_run_time", None)
@@ -271,6 +278,67 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
             _schedule_trade_scan_job(context.job_queue, hour=hour, minute=minute)
 
 
+async def check_open_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
+    portfolio = context.bot_data.get("portfolio_tracker")
+    aggregator = context.bot_data.get("aggregator")
+    if not isinstance(portfolio, PortfolioTracker) or not isinstance(aggregator, DataAggregator):
+        logger.error("Open position checker dependencies missing in bot_data")
+        return
+    if not portfolio.positions:
+        return
+
+    chat_id = _scheduler_chat_id()
+
+    try:
+        stale_symbols = [
+            symbol
+            for symbol in portfolio.get_dead_money_trades()
+            if not portfolio.positions[symbol].dead_money_alerted
+        ]
+        if stale_symbols:
+            lines = [
+                "<b>DEAD MONEY ALERT</b>",
+                "",
+                "These trades have been open 7+ days without hitting TP1:",
+            ]
+            for symbol in stale_symbols:
+                lines.append(f"- {html.escape(symbol)}")
+                portfolio.mark_dead_money_alerted(symbol)
+            lines.extend(
+                [
+                    "",
+                    "Consider closing them to free up capital for better setups.",
+                ]
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                parse_mode="HTML",
+            )
+
+        for position in list(portfolio.positions.values()):
+            if position.tp1_hit or position.tp1 is None:
+                continue
+            current_price = await aggregator.get_current_price(position.symbol, position.asset_type)
+            if current_price is None or not _tp1_reached(position, current_price):
+                continue
+
+            portfolio.mark_tp1_hit(position.symbol)
+            direction_label = "LONG" if position.direction == "LONG" else "SHORT"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"<b>TP1 HIT</b>\n\n"
+                    f"{html.escape(position.symbol)} {direction_label} reached TP1 at "
+                    f"{_format_trade_scan_price(position.tp1)}.\n"
+                    f"Move your stop to breakeven at {_format_trade_scan_price(position.entry_price)}."
+                ),
+                parse_mode="HTML",
+            )
+    except Exception:
+        logger.exception("Open position checker failed")
+
+
 def _schedule_trade_scan_job(job_queue: object, *, hour: int, minute: int) -> None:
     if not hasattr(job_queue, "run_once"):
         raise RuntimeError("Job queue does not support run_once scheduling")
@@ -293,6 +361,16 @@ def _schedule_trade_scan_job(job_queue: object, *, hour: int, minute: int) -> No
         name=f"trade_scan_{hour:02d}_{minute:02d}",
         data={"hour": hour, "minute": minute},
     )
+
+
+def _tp1_reached(position: object, current_price: float) -> bool:
+    tp1 = getattr(position, "tp1", None)
+    direction = getattr(position, "direction", "")
+    if not isinstance(tp1, int | float):
+        return False
+    if direction == "LONG":
+        return current_price >= float(tp1)
+    return current_price <= float(tp1)
 
 
 def _cache_briefing_snapshot(context: ContextTypes.DEFAULT_TYPE, data: BriefingData) -> None:
@@ -546,3 +624,10 @@ async def _send_correlation_anomaly_alerts(
             await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
         except Exception:
             logger.exception("Failed to send correlation anomaly alert for %s-%s", pair.symbol_a, pair.symbol_b)
+
+
+def _scheduler_chat_id() -> int | str:
+    try:
+        return int(settings.telegram_chat_id)
+    except ValueError:
+        return settings.telegram_chat_id

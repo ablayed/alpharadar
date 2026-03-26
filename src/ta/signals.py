@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -31,6 +31,11 @@ class TASignal:
     overall_signal: str
     confidence: float
     summary: str
+    _close: np.ndarray | None = field(default=None, repr=False)
+    _high: np.ndarray | None = field(default=None, repr=False)
+    _low: np.ndarray | None = field(default=None, repr=False)
+    _volume: np.ndarray | None = field(default=None, repr=False)
+    _open: np.ndarray | None = field(default=None, repr=False)
 
 
 def compute_signals(
@@ -39,6 +44,9 @@ def compute_signals(
     high: np.ndarray,
     low: np.ndarray,
     timeframe: str = "daily",
+    *,
+    volume: np.ndarray | None = None,
+    open_: np.ndarray | None = None,
 ) -> TASignal:
     close_array = np.asarray(close, dtype=np.float64)
     high_array = np.asarray(high, dtype=np.float64)
@@ -47,6 +55,18 @@ def compute_signals(
         raise ValueError("close, high, and low arrays must have the same length")
     if len(close_array) < 60:
         raise ValueError("Need at least 60 candles to compute TA signals")
+
+    volume_array: np.ndarray | None = None
+    if volume is not None:
+        volume_array = np.asarray(volume, dtype=np.float64)
+        if len(volume_array) != len(close_array):
+            raise ValueError("volume array must have the same length as close")
+
+    open_array: np.ndarray | None = None
+    if open_ is not None:
+        open_array = np.asarray(open_, dtype=np.float64)
+        if len(open_array) != len(close_array):
+            raise ValueError("open array must have the same length as close")
 
     current_price = float(close_array[-1])
 
@@ -173,6 +193,11 @@ def compute_signals(
         overall_signal=overall_signal,
         confidence=float(confidence),
         summary=summary,
+        _close=close_array.copy(),
+        _high=high_array.copy(),
+        _low=low_array.copy(),
+        _volume=volume_array.copy() if volume_array is not None else None,
+        _open=open_array.copy() if open_array is not None else None,
     )
 
 

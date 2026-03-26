@@ -195,8 +195,16 @@ class DataAggregator:
             )
             if candles is None:
                 return None
-            close, high, low, _volume = candles
-            return compute_signals(symbol_upper, close, high, low, timeframe="daily")
+            close, high, low, volume, open_ = candles
+            return compute_signals(
+                symbol_upper,
+                close,
+                high,
+                low,
+                timeframe="daily",
+                volume=volume,
+                open_=open_,
+            )
 
         coin_map = await self._coin_id_map()
         coin_id = coin_map.get(symbol_upper)
@@ -205,8 +213,16 @@ class DataAggregator:
         candles = await fetch_crypto_candles(coin_id, db_path=self.settings.db_path)
         if candles is None:
             return None
-        close, high, low, _volume = candles
-        return compute_signals(symbol_upper, close, high, low, timeframe="daily")
+        close, high, low, volume, open_ = candles
+        return compute_signals(
+            symbol_upper,
+            close,
+            high,
+            low,
+            timeframe="daily",
+            volume=volume,
+            open_=open_,
+        )
 
     async def get_ta_signal_payload(self, symbol: str) -> dict[str, object] | None:
         try:
@@ -216,7 +232,10 @@ class DataAggregator:
             return None
         if signal is None:
             return None
-        return cast(dict[str, object], asdict(signal))
+        payload = cast(dict[str, object], asdict(signal))
+        for key in ("_close", "_high", "_low", "_volume", "_open"):
+            payload.pop(key, None)
+        return payload
 
     async def update_correlation_engine(self, *, persist: bool = True) -> dict[int, CorrelationSnapshot]:
         watchlist = await self.db.get_watchlist()
@@ -323,8 +342,8 @@ class DataAggregator:
         crypto_items: list[WatchlistItem],
         *,
         include_proxies: bool,
-    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
         stock_universe = {symbol.upper() for symbol in stock_symbols}
         if include_proxies:
             stock_universe.update(SIGNAL_CONTEXT_PROXIES)
@@ -338,7 +357,11 @@ class DataAggregator:
             for symbol in sorted(stock_universe)
         ]
         crypto_symbols: list[str] = []
-        crypto_jobs: list[asyncio.Future[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None] | asyncio.Task[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None] | object] = []
+        crypto_jobs: list[
+            asyncio.Future[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None]
+            | asyncio.Task[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None]
+            | object
+        ] = []
         for item in crypto_items:
             if item.coingecko_id is None:
                 continue
@@ -365,7 +388,7 @@ class DataAggregator:
 
     def _ta_signal_map_from_candles(
         self,
-        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
         symbols: set[str],
     ) -> dict[str, TASignal]:
         ta_signals: dict[str, TASignal] = {}
@@ -374,15 +397,23 @@ class DataAggregator:
             if candles is None:
                 continue
             try:
-                close, high, low, _volume = candles
-                ta_signals[symbol.upper()] = compute_signals(symbol.upper(), close, high, low, timeframe="daily")
+                close, high, low, volume, open_ = candles
+                ta_signals[symbol.upper()] = compute_signals(
+                    symbol.upper(),
+                    close,
+                    high,
+                    low,
+                    timeframe="daily",
+                    volume=volume,
+                    open_=open_,
+                )
             except Exception:
                 logger.exception("TA signal build failed for %s", symbol.upper())
         return ta_signals
 
     async def _refresh_correlation_from_candles(
         self,
-        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+        candle_map: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
         *,
         persist: bool,
     ) -> dict[int, CorrelationSnapshot]:

@@ -7,7 +7,9 @@ from typing import Mapping
 
 from src.agents.state import DebateVerdict
 from src.signals.models import CompositeScore
+from src.ta.indicators import obv_divergence, volume_confirmation
 from src.ta.signals import TASignal
+from src.ta.swings import compute_fibonacci, detect_stop_hunt, get_last_swing
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +129,14 @@ def generate_trade_signal(
                 if current_price - atr_value <= support <= current_price:
                     support_candidates.append(support)
             entry_low = max(min(support_candidates), 0.0001)
-        stop_loss = max(entry_low - sl_distance, 0.0001)
+        stop_loss = _hybrid_stop_loss(
+            current_price=current_price,
+            direction=direction,
+            sl_distance=sl_distance,
+            ta_signal=ta_signal,
+            sl_max_pct=STOCK_SL_CAPS["sl_max_pct"],
+            min_price=0.0001,
+        )
         tp1 = entry_high + (sl_distance * 1.5)
         tp2 = entry_high + (sl_distance * 2.5)
         tp3 = entry_high + (sl_distance * 4.0)
@@ -140,7 +149,14 @@ def generate_trade_signal(
                 if current_price <= resistance <= current_price + atr_value:
                     resistance_candidates.append(resistance)
             entry_high = max(resistance_candidates)
-        stop_loss = entry_high + sl_distance
+        stop_loss = _hybrid_stop_loss(
+            current_price=current_price,
+            direction=direction,
+            sl_distance=sl_distance,
+            ta_signal=ta_signal,
+            sl_max_pct=STOCK_SL_CAPS["sl_max_pct"],
+            min_price=0.0001,
+        )
         tp1 = entry_low - (sl_distance * 1.5)
         tp2 = entry_low - (sl_distance * 2.5)
         tp3 = entry_low - (sl_distance * 4.0)
@@ -158,6 +174,15 @@ def generate_trade_signal(
             tp3 = min(tp3, max(ta_signal.bb_upper, tp2))
         else:
             tp3 = max(tp3, min(ta_signal.bb_lower, tp2))
+
+    tp1, tp2, tp3 = _apply_fibonacci_targets(
+        current_price=current_price,
+        direction=direction,
+        ta_signal=ta_signal,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+    )
 
     entry_reference = entry_high if direction == "LONG" else entry_low
     tp1, tp2, tp3 = _normalize_targets(direction, entry_reference, sl_distance, tp1, tp2, tp3)
@@ -362,6 +387,49 @@ def generate_crypto_trade_signal(
                 )
             )
 
+        if ta_signal._close is not None and ta_signal._volume is not None and len(ta_signal._volume) > 0:
+            divergence = obv_divergence(ta_signal._close, ta_signal._volume)
+            if divergence == "bullish_divergence":
+                factors.append(
+                    ConfluenceFactor(
+                        name="obv_divergence",
+                        direction="bullish",
+                        strength=0.8,
+                        description="Volume accumulation despite price decline - smart money buying",
+                    )
+                )
+            elif divergence == "bearish_divergence":
+                factors.append(
+                    ConfluenceFactor(
+                        name="obv_divergence",
+                        direction="bearish",
+                        strength=0.8,
+                        description="Volume distribution despite price rise - smart money selling",
+                    )
+                )
+
+            volume_confirmed, volume_ratio = volume_confirmation(ta_signal._volume)
+            if volume_confirmed:
+                factors.append(
+                    ConfluenceFactor(
+                        name="volume",
+                        direction=_trend_bias_direction(ta_signal),
+                        strength=min(0.7, volume_ratio * 0.3),
+                        description=f"Volume {volume_ratio:.1f}x above average - confirms the move",
+                    )
+                )
+
+        latest_hunt = _latest_stop_hunt(ta_signal)
+        if latest_hunt is not None:
+            factors.append(
+                ConfluenceFactor(
+                    name="stop_hunt",
+                    direction=str(latest_hunt["direction_after"]),
+                    strength=0.7,
+                    description=str(latest_hunt["description"]),
+                )
+            )
+
     event_type = str(event_data.get("event_type", "")) if event_data is not None else ""
     remaining = _event_float(event_data, "remaining_drift_pct") or 0.0
     if event_type and event_type not in {"general_news", "unknown", "none"}:
@@ -510,7 +578,14 @@ def generate_crypto_trade_signal(
         entry_low = max(current_price - (atr * 0.3), 0.0000001)
         if ta_signal is not None and current_price - atr <= ta_signal.ema_20 <= current_price:
             entry_low = min(entry_low, ta_signal.ema_20)
-        stop_loss = max(entry_low - sl_distance, 0.0000001)
+        stop_loss = _hybrid_stop_loss(
+            current_price=current_price,
+            direction=direction,
+            sl_distance=sl_distance,
+            ta_signal=ta_signal,
+            sl_max_pct=SPOT_SL_CAPS["sl_max_pct"],
+            min_price=0.0000001,
+        )
         tp1 = entry_high + (sl_distance * 1.5)
         tp2 = entry_high + (sl_distance * 2.5)
         tp3 = entry_high + (sl_distance * 4.0)
@@ -531,7 +606,14 @@ def generate_crypto_trade_signal(
         entry_high = current_price + (atr * 0.3)
         if ta_signal is not None and current_price <= ta_signal.ema_20 <= current_price + atr:
             entry_high = max(entry_high, ta_signal.ema_20)
-        stop_loss = entry_high + sl_distance
+        stop_loss = _hybrid_stop_loss(
+            current_price=current_price,
+            direction=direction,
+            sl_distance=sl_distance,
+            ta_signal=ta_signal,
+            sl_max_pct=SPOT_SL_CAPS["sl_max_pct"],
+            min_price=0.0000001,
+        )
         tp1 = entry_low - (sl_distance * 1.5)
         tp2 = entry_low - (sl_distance * 2.5)
         tp3 = entry_low - (sl_distance * 4.0)
@@ -543,6 +625,15 @@ def generate_crypto_trade_signal(
 
         if ta_signal is not None and ta_signal.bb_lower < tp2 and ta_signal.bb_lower > tp3:
             tp3 = max(tp3, ta_signal.bb_lower * 0.98)
+
+    tp1, tp2, tp3 = _apply_fibonacci_targets(
+        current_price=current_price,
+        direction=direction,
+        ta_signal=ta_signal,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+    )
 
     entry_reference = current_price
     tp1, tp2, tp3 = _normalize_targets(direction, entry_reference, sl_distance, tp1, tp2, tp3)
@@ -717,6 +808,139 @@ def _entry_reference_from_zone(
     return entry_low if direction == "LONG" else entry_high
 
 
+def _apply_fibonacci_targets(
+    *,
+    current_price: float,
+    direction: str,
+    ta_signal: TASignal | None,
+    tp1: float,
+    tp2: float,
+    tp3: float,
+) -> tuple[float, float, float]:
+    fib_targets = _fibonacci_targets_from_ta(ta_signal, direction)
+    if fib_targets is None:
+        return tp1, tp2, tp3
+
+    fib_tp1, fib_tp2, fib_tp3 = fib_targets
+    if direction == "LONG":
+        if fib_tp1 > current_price:
+            tp1 = min(tp1, fib_tp1)
+        if fib_tp2 > current_price:
+            tp2 = min(tp2, fib_tp2)
+        if fib_tp3 > current_price:
+            tp3 = min(tp3, fib_tp3)
+        return tp1, tp2, tp3
+
+    if fib_tp1 < current_price:
+        tp1 = max(tp1, fib_tp1)
+    if fib_tp2 < current_price:
+        tp2 = max(tp2, fib_tp2)
+    if fib_tp3 < current_price:
+        tp3 = max(tp3, fib_tp3)
+    return tp1, tp2, tp3
+
+
+def _fibonacci_targets_from_ta(
+    ta_signal: TASignal | None,
+    direction: str,
+) -> tuple[float, float, float] | None:
+    if ta_signal is None or ta_signal._high is None or ta_signal._low is None:
+        return None
+
+    last_high, last_low = get_last_swing(ta_signal._high, ta_signal._low, order=5)
+    if last_high is None or last_low is None or last_high.price <= last_low.price:
+        return None
+
+    fib = compute_fibonacci(
+        last_high.price,
+        last_low.price,
+        "up" if direction == "LONG" else "down",
+    )
+    return fib.ext_1272, fib.ext_1618, fib.ext_2618
+
+
+def _hybrid_stop_loss(
+    *,
+    current_price: float,
+    direction: str,
+    sl_distance: float,
+    ta_signal: TASignal | None,
+    sl_max_pct: float,
+    min_price: float,
+) -> float:
+    atr_stop = current_price - sl_distance if direction == "LONG" else current_price + sl_distance
+    structure_stop = _structure_stop_from_ta(ta_signal, direction)
+    pct_cap = (
+        current_price * (1 - sl_max_pct / 100)
+        if direction == "LONG"
+        else current_price * (1 + sl_max_pct / 100)
+    )
+
+    if direction == "LONG":
+        candidates = [
+            stop
+            for stop in (atr_stop, structure_stop, pct_cap)
+            if stop is not None and min_price <= stop < current_price
+        ]
+        if not candidates:
+            return max(current_price * (1 - sl_max_pct / 100), min_price)
+        return max(candidates)
+
+    candidates = [
+        stop
+        for stop in (atr_stop, structure_stop, pct_cap)
+        if stop is not None and stop > current_price
+    ]
+    if not candidates:
+        return current_price * (1 + sl_max_pct / 100)
+    return min(candidates)
+
+
+def _structure_stop_from_ta(ta_signal: TASignal | None, direction: str) -> float | None:
+    if ta_signal is None or ta_signal._high is None or ta_signal._low is None:
+        return None
+
+    last_high, last_low = get_last_swing(ta_signal._high, ta_signal._low, order=5)
+    if direction == "LONG" and last_low is not None:
+        return last_low.price - (last_low.price * 0.005)
+    if direction == "SHORT" and last_high is not None:
+        return last_high.price + (last_high.price * 0.005)
+    return None
+
+
+def _latest_stop_hunt(ta_signal: TASignal | None) -> dict[str, float | int | str] | None:
+    if (
+        ta_signal is None
+        or ta_signal._high is None
+        or ta_signal._low is None
+        or ta_signal._close is None
+        or ta_signal._open is None
+    ):
+        return None
+
+    hunts = detect_stop_hunt(
+        ta_signal._high,
+        ta_signal._low,
+        ta_signal._close,
+        ta_signal._open,
+    )
+    if not hunts:
+        return None
+
+    latest = hunts[-1]
+    if int(latest["index"]) < len(ta_signal._close) - 3:
+        return None
+    return latest
+
+
+def _trend_bias_direction(ta_signal: TASignal) -> str:
+    if ta_signal.trend in {"up", "strong_up"}:
+        return "bullish"
+    if ta_signal.trend in {"down", "strong_down"}:
+        return "bearish"
+    return "bullish" if ta_signal.macd_histogram >= 0 else "bearish"
+
+
 def _has_strong_ta_conflict(direction: str, ta_signal: TASignal | None) -> bool:
     if ta_signal is None:
         return False
@@ -824,6 +1048,9 @@ def _check_manipulation(
             flags.append("Volatility is unusually high, so the move may be event-driven or easily whipsawed.")
         if ta_signal.bb_squeeze and ta_signal.bb_position in {"above_upper", "below_lower"}:
             flags.append("Price just broke out of a tight range. Confirm follow-through before sizing up.")
+        latest_hunt = _latest_stop_hunt(ta_signal)
+        if latest_hunt is not None:
+            flags.append(str(latest_hunt["description"]))
 
     if regime == "volatile":
         flags.append("The broader market is volatile. Smaller size and more patience make sense here.")
@@ -851,6 +1078,9 @@ def _check_manipulation_v2(
             flags.append("Extreme volatility - reduce position size, use wider stops")
         if ta_signal.bb_squeeze and ta_signal.bb_position in {"above_upper", "below_lower"}:
             flags.append("Breakout from squeeze - verify momentum before full entry")
+        latest_hunt = _latest_stop_hunt(ta_signal)
+        if latest_hunt is not None:
+            flags.append(str(latest_hunt["description"]))
 
     strong_bull = sum(1 for factor in factors if factor.direction == "bullish" and factor.strength > 0.7)
     strong_bear = sum(1 for factor in factors if factor.direction == "bearish" and factor.strength > 0.7)

@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.ta.indicators import atr, bollinger_bands, ema, rsi, sma
+from src.ta.indicators import (
+    atr,
+    bollinger_bands,
+    ema,
+    obv,
+    obv_divergence,
+    rsi,
+    sma,
+    volume_confirmation,
+)
 from src.ta.signals import compute_signals
 
 
@@ -49,12 +58,37 @@ def test_bollinger_bands_and_atr_align_to_input_length() -> None:
     assert atr_values[-1] > 0
 
 
+def test_obv_and_divergence_helpers_detect_flow_shifts() -> None:
+    close = np.array([1.0, 2.0, 1.0, 1.0, 3.0], dtype=np.float64)
+    volume = np.array([10.0, 5.0, 7.0, 2.0, 3.0], dtype=np.float64)
+    np.testing.assert_allclose(obv(close, volume), np.array([0.0, 5.0, -2.0, -2.0, 1.0]))
+
+    bullish_close = np.array([12.0, 11.0, 10.0, 11.0, 10.0, 9.0], dtype=np.float64)
+    bullish_volume = np.array([100.0, 100.0, 100.0, 100.0, 1.0, 1.0], dtype=np.float64)
+    bearish_close = np.array([10.0, 11.0, 12.0, 11.0, 12.0, 13.0], dtype=np.float64)
+    bearish_volume = np.array([100.0, 100.0, 100.0, 100.0, 1.0, 1.0], dtype=np.float64)
+
+    assert obv_divergence(bullish_close, bullish_volume, lookback=3) == "bullish_divergence"
+    assert obv_divergence(bearish_close, bearish_volume, lookback=3) == "bearish_divergence"
+
+
+def test_volume_confirmation_flags_breakout_volume() -> None:
+    volume = np.array([100.0] * 20 + [140.0], dtype=np.float64)
+
+    confirmed, ratio = volume_confirmation(volume, lookback=20, threshold=1.25)
+
+    assert confirmed is True
+    assert ratio == 1.4
+
+
 def test_compute_signals_returns_structured_ta_summary() -> None:
     close = np.linspace(100.0, 150.0, 80)
     high = close + 1.5
     low = close - 1.5
+    volume = np.linspace(1_000.0, 1_500.0, 80)
+    open_ = close - 0.5
 
-    signal = compute_signals("NVDA", close, high, low)
+    signal = compute_signals("NVDA", close, high, low, volume=volume, open_=open_)
 
     assert signal.symbol == "NVDA"
     assert signal.timeframe == "daily"
@@ -62,3 +96,8 @@ def test_compute_signals_returns_structured_ta_summary() -> None:
     assert signal.overall_signal in {"strong_buy", "buy", "neutral", "sell", "strong_sell"}
     assert 0.0 <= signal.confidence <= 1.0
     assert "NVDA:" in signal.summary
+    np.testing.assert_allclose(signal._close, close)
+    np.testing.assert_allclose(signal._high, high)
+    np.testing.assert_allclose(signal._low, low)
+    np.testing.assert_allclose(signal._volume, volume)
+    np.testing.assert_allclose(signal._open, open_)

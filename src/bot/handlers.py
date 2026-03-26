@@ -25,7 +25,7 @@ from src.sentiment.analyzer import SentimentAnalyzer
 from src.signals.models import CompositeScore
 from src.storage.database import Database, WatchlistItem
 from src.ta.signals import TASignal
-from src.trade import TradeSignal, generate_crypto_trade_signal, generate_trade_signal
+from src.trade import OpenPosition, PortfolioTracker, TradeSignal, generate_crypto_trade_signal, generate_trade_signal
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,7 @@ def _help_text() -> str:
         "/signals NVDA  Show the full signal stack for one symbol\n"
         "/trade NVDA  Generate a structured trade setup for one symbol\n"
         "/trades  Scan the watchlist for active trade setups\n"
+        "/portfolio  Show tracked trade risk and stale positions\n"
         "/ta NVDA  Compute local technical analysis for one symbol\n"
         "/alerts  Show real-time alert pipeline status\n"
         "/accuracy  Show prediction accuracy and calibration buckets\n"
@@ -230,6 +231,20 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"{tvl_emoji} DeFi TVL: ${data.total_tvl / 1e9:.1f}B ({tvl_change:+.1f}%)")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    tracker = context.application.bot_data.get("portfolio_tracker")
+    if not isinstance(tracker, PortfolioTracker):
+        await update.message.reply_text("Portfolio tracker not initialized.")
+        return
+
+    await update.message.reply_text(tracker.format_status(), parse_mode="HTML")
 
 
 async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -640,6 +655,30 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if price_item.asset_type.value == "crypto"
             else _format_trade_text(signal)
         )
+        portfolio_tracker = context.application.bot_data.get("portfolio_tracker")
+        if isinstance(portfolio_tracker, PortfolioTracker):
+            portfolio_notes = _portfolio_trade_notes(
+                symbol=symbol,
+                asset_type=price_item.asset_type.value,
+                signal=signal,
+                portfolio_tracker=portfolio_tracker,
+                correlation_engine=context.application.bot_data.get("correlation_engine"),
+            )
+            if portfolio_notes:
+                trade_text += f"\n\n{portfolio_notes}"
+            portfolio_tracker.add_position(
+                OpenPosition(
+                    symbol=symbol,
+                    asset_type=price_item.asset_type.value,
+                    direction=signal.direction,
+                    entry_price=signal.entry_high,
+                    stop_loss=signal.stop_loss,
+                    tp1=signal.tp1,
+                    risk_pct=signal.suggested_risk_pct,
+                    opened_at=datetime.now(ZoneInfo("UTC")).timestamp(),
+                )
+            )
+            trade_text += "\n\n<i>This setup is now tracked in /portfolio.</i>"
         await _send_long_message(
             context.bot,
             update.effective_chat.id,
@@ -1208,6 +1247,40 @@ def _store_latest_briefing(context: ContextTypes.DEFAULT_TYPE, data: BriefingDat
     context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
     context.bot_data["ta_signals"] = data.ta_signals
     context.bot_data["agent_analysis"] = data.agent_analysis
+
+
+def _portfolio_trade_notes(
+    *,
+    symbol: str,
+    asset_type: str,
+    signal: TradeSignal,
+    portfolio_tracker: PortfolioTracker,
+    correlation_engine: object,
+) -> str:
+    del asset_type
+    notes: list[str] = []
+
+    allowed, reason = portfolio_tracker.check_risk_budget(
+        signal.suggested_risk_pct,
+        replacing_symbol=symbol,
+    )
+    if not allowed:
+        notes.append(f"🚫 <b>RISK LIMIT:</b> {html.escape(reason, quote=False)}")
+
+    correlations: dict[str, float] = {}
+    if correlation_engine is not None and hasattr(correlation_engine, "get_pair_analysis"):
+        for existing_symbol in portfolio_tracker.positions:
+            if existing_symbol == symbol.upper():
+                continue
+            pair = correlation_engine.get_pair_analysis(symbol.upper(), existing_symbol)
+            if pair is not None and hasattr(pair, "corr_20d"):
+                correlations[existing_symbol] = float(pair.corr_20d)
+
+    overlap_warning = portfolio_tracker.check_correlation_overlap(symbol, correlations)
+    if overlap_warning:
+        notes.append(f"⚠️ <b>CORRELATION:</b> {html.escape(overlap_warning, quote=False)}")
+
+    return "\n\n".join(notes)
 
 
 def _format_playbook_message(

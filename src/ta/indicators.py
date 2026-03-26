@@ -132,6 +132,71 @@ def atr(
     return result
 
 
+def obv(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+    close_array = _as_float_array(close)
+    volume_array = _as_float_array(volume)
+    if len(close_array) != len(volume_array):
+        raise ValueError("close and volume arrays must have matching lengths")
+    if len(close_array) == 0:
+        return np.array([], dtype=np.float64)
+
+    result = np.zeros_like(close_array)
+    for index in range(1, len(close_array)):
+        if close_array[index] > close_array[index - 1]:
+            result[index] = result[index - 1] + volume_array[index]
+        elif close_array[index] < close_array[index - 1]:
+            result[index] = result[index - 1] - volume_array[index]
+        else:
+            result[index] = result[index - 1]
+    return result
+
+
+def obv_divergence(
+    close: np.ndarray,
+    volume: np.ndarray,
+    lookback: int = 14,
+) -> str:
+    close_array = _as_float_array(close)
+    volume_array = _as_float_array(volume)
+    if len(close_array) != len(volume_array):
+        raise ValueError("close and volume arrays must have matching lengths")
+    if len(close_array) < lookback * 2:
+        return "none"
+
+    obv_values = obv(close_array, volume_array)
+
+    recent_close = close_array[-lookback:]
+    prior_close = close_array[-lookback * 2 : -lookback]
+    recent_obv = obv_values[-lookback:]
+    prior_obv = obv_values[-lookback * 2 : -lookback]
+
+    price_lower_low = np.min(recent_close) < np.min(prior_close)
+    obv_higher_low = np.min(recent_obv) > np.min(prior_obv)
+    price_higher_high = np.max(recent_close) > np.max(prior_close)
+    obv_lower_high = np.max(recent_obv) < np.max(prior_obv)
+
+    if price_lower_low and obv_higher_low:
+        return "bullish_divergence"
+    if price_higher_high and obv_lower_high:
+        return "bearish_divergence"
+    return "none"
+
+
+def volume_confirmation(
+    volume: np.ndarray,
+    lookback: int = 20,
+    threshold: float = 1.25,
+) -> tuple[bool, float]:
+    volume_array = _as_float_array(volume)
+    if len(volume_array) < lookback + 1:
+        return False, 0.0
+
+    average_volume = float(np.mean(volume_array[-lookback - 1 : -1]))
+    current_volume = float(volume_array[-1])
+    ratio = current_volume / average_volume if average_volume > 0 else 0.0
+    return ratio >= threshold, float(ratio)
+
+
 def _rsi_value(avg_gain: float, avg_loss: float) -> float:
     if avg_loss == 0:
         return 100.0 if avg_gain > 0 else 50.0
