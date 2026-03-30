@@ -74,7 +74,8 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
     job_queue.run_daily(
         callback=run_weekly_reflection_job,
         time=datetime.time(hour=8, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
-        days=(6,),
+        # python-telegram-bot maps 0-6 to Sunday-Saturday.
+        days=(0,),
         name="weekly_reflection",
     )
     job_queue.run_daily(
