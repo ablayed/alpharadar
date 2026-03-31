@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -29,6 +30,12 @@ from src.ta.signals import TASignal
 from src.trade import OpenPosition, PortfolioTracker, TradeSignal, generate_crypto_trade_signal, generate_trade_signal
 
 logger = logging.getLogger(__name__)
+
+_alert_cooldowns: dict[str, float] = {}
+_alert_zone_active: dict[str, bool] = {}
+_alert_level_sides: dict[str, int] = {}
+_alert_state_seen: dict[str, float] = {}
+ALERT_COOLDOWN_SECONDS = 3600
 
 COMMON_CRYPTO_MAP: dict[str, str] = {
     "BTC": "bitcoin",
@@ -1781,7 +1788,10 @@ async def check_trade_levels(
     *,
     portfolio_tracker: PortfolioTracker | None = None,
 ) -> None:
+    now = time.time()
     timestamp = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    symbol_label = html.escape(symbol.upper())
+
     async with aiosqlite.connect(db_path) as connection:
         cursor = await connection.execute(
             """
@@ -1799,6 +1809,16 @@ async def check_trade_levels(
             if tp3_hit or sl_hit or entry_price is None:
                 continue
 
+            entry = float(entry_price)
+            if entry <= 0:
+                continue
+
+            pct_from_entry = (
+                ((current_price - entry) / entry) * 100
+                if direction == "LONG"
+                else ((entry - current_price) / entry) * 100
+            )
+
             stop_triggered = (
                 direction == "LONG" and current_price <= float(stop_loss)
             ) or (
@@ -1813,10 +1833,10 @@ async def check_trade_levels(
                     await bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            f"🔴 <b>STOP LOSS HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"\U0001F534 <b>STOP LOSS HIT: {symbol_label}</b>\n\n"
                             f"Price reached {_format_trade_price(current_price)} "
                             f"(SL was {_format_trade_price(float(stop_loss))}).\n"
-                            f"Use /close {html.escape(symbol.upper())} {current_price:.8g} sl to log the exit."
+                            f"Use /close {symbol_label} {current_price:.8g} sl to log the exit."
                         ),
                         parse_mode="HTML",
                     )
@@ -1842,11 +1862,11 @@ async def check_trade_levels(
                     await bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            f"🎯 <b>TP1 HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"\U0001F3AF <b>TP1 HIT: {symbol_label}</b>\n\n"
                             f"Price reached {_format_trade_price(current_price)}.\n"
                             f"Sell 1/3 now and move your stop to breakeven "
-                            f"({_format_trade_price(float(entry_price))}).\n\n"
-                            f"Use /close {html.escape(symbol.upper())} {current_price:.8g} tp1 "
+                            f"({_format_trade_price(entry)}).\n\n"
+                            f"Use /close {symbol_label} {current_price:.8g} tp1 "
                             "if you are taking full profit here."
                         ),
                         parse_mode="HTML",
@@ -1871,7 +1891,7 @@ async def check_trade_levels(
                     await bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            f"🎯🎯 <b>TP2 HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"\U0001F3AF\U0001F3AF <b>TP2 HIT: {symbol_label}</b>\n\n"
                             f"Price reached {_format_trade_price(current_price)}.\n"
                             f"Sell another 1/3 and move your stop to TP1 "
                             f"({_format_trade_price(float(tp1))})."
@@ -1898,16 +1918,149 @@ async def check_trade_levels(
                     await bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            f"🎯🎯🎯 <b>TP3 HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"\U0001F3AF\U0001F3AF\U0001F3AF <b>TP3 HIT: {symbol_label}</b>\n\n"
                             f"Full target reached at {_format_trade_price(current_price)}.\n"
-                            f"Use /close {html.escape(symbol.upper())} {current_price:.8g} tp3"
+                            f"Use /close {symbol_label} {current_price:.8g} tp3"
                         ),
                         parse_mode="HTML",
                     )
                 except Exception:
                     logger.exception("Failed to send TP3 alert for %s", symbol.upper())
 
+            effective_sl_hit = bool(sl_hit or stop_triggered)
+            effective_tp1_hit = bool(tp1_hit or tp1_triggered)
+            effective_tp2_hit = bool(tp2_hit or tp2_triggered)
+            effective_tp3_hit = bool(tp3_hit or tp3_triggered)
+
+            proximity_checks = [
+                ("SL", float(stop_loss), not effective_sl_hit),
+                ("TP1", float(tp1), not effective_tp1_hit),
+                ("TP2", float(tp2), effective_tp1_hit and not effective_tp2_hit),
+                ("TP3", float(tp3), effective_tp2_hit and not effective_tp3_hit),
+            ]
+            for level_name, level_price, enabled in proximity_checks:
+                alert_key = f"{trade_id}:proximity:{level_name}"
+                _alert_state_seen[alert_key] = now
+                if not enabled or level_price <= 0:
+                    _alert_zone_active[alert_key] = False
+                    continue
+
+                distance_pct = abs(current_price - level_price) / max(abs(current_price), 1e-10) * 100
+                in_zone = distance_pct <= 1.0
+                if not in_zone:
+                    _alert_zone_active[alert_key] = False
+                    continue
+
+                if (
+                    not _alert_zone_active.get(alert_key, False)
+                    and now - _alert_cooldowns.get(alert_key, 0.0) > ALERT_COOLDOWN_SECONDS
+                ):
+                    _alert_cooldowns[alert_key] = now
+                    emoji = "\U0001F534" if level_name == "SL" else "\U0001F3AF"
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"{emoji} <b>{symbol_label}</b> approaching {level_name}\n"
+                                f"Price: {_format_trade_price(current_price)} ({pct_from_entry:+.1f}% from entry)\n"
+                                f"{level_name} at {_format_trade_price(level_price)} - {distance_pct:.1f}% away"
+                            ),
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to send %s proximity alert for %s",
+                            level_name,
+                            symbol.upper(),
+                        )
+                _alert_zone_active[alert_key] = True
+
+            entry_key = f"{trade_id}:cross:entry"
+            entry_distance_pct = abs(current_price - entry) / entry * 100
+            entry_in_zone = entry_distance_pct <= 0.3
+            previous_entry_side = _alert_level_sides.get(entry_key)
+            _alert_state_seen[entry_key] = now
+            if (
+                previous_entry_side is not None
+                and previous_entry_side != 0
+                and entry_in_zone
+                and not _alert_zone_active.get(entry_key, False)
+                and now - _alert_cooldowns.get(entry_key, 0.0) > ALERT_COOLDOWN_SECONDS
+            ):
+                _alert_cooldowns[entry_key] = now
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"\U0001F4CD <b>{symbol_label}</b> back at entry level\n"
+                            f"Price: {_format_trade_price(current_price)} ({pct_from_entry:+.1f}% from entry)"
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("Failed to send entry-cross alert for %s", symbol.upper())
+            _alert_zone_active[entry_key] = entry_in_zone
+            _alert_level_sides[entry_key] = _price_side(current_price, entry)
+
+            if not effective_tp1_hit and float(tp1) > 0:
+                halfway = (entry + float(tp1)) / 2
+                halfway_key = f"{trade_id}:cross:halfway_tp1"
+                halfway_distance_pct = abs(current_price - halfway) / max(abs(halfway), 1e-10) * 100
+                halfway_in_zone = halfway_distance_pct <= 0.5
+                previous_halfway_side = _alert_level_sides.get(halfway_key)
+                crossed_halfway = (
+                    previous_halfway_side is not None
+                    and (
+                        (direction == "LONG" and previous_halfway_side < 0 and current_price >= halfway)
+                        or (direction == "SHORT" and previous_halfway_side > 0 and current_price <= halfway)
+                    )
+                )
+                _alert_state_seen[halfway_key] = now
+                if (
+                    crossed_halfway
+                    and halfway_in_zone
+                    and not _alert_zone_active.get(halfway_key, False)
+                    and now - _alert_cooldowns.get(halfway_key, 0.0) > ALERT_COOLDOWN_SECONDS
+                ):
+                    _alert_cooldowns[halfway_key] = now
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"\U0001F4CD <b>{symbol_label}</b> halfway to TP1\n"
+                                f"Price: {_format_trade_price(current_price)} ({pct_from_entry:+.1f}% from entry)"
+                            ),
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        logger.exception("Failed to send halfway alert for %s", symbol.upper())
+                _alert_zone_active[halfway_key] = halfway_in_zone
+                _alert_level_sides[halfway_key] = _price_side(current_price, halfway)
+            else:
+                halfway_key = f"{trade_id}:cross:halfway_tp1"
+                _alert_zone_active[halfway_key] = False
+
         await connection.commit()
+
+    _cleanup_trade_alert_state(now)
+
+
+def _price_side(current_price: float, level: float) -> int:
+    if current_price > level:
+        return 1
+    if current_price < level:
+        return -1
+    return 0
+
+
+def _cleanup_trade_alert_state(now: float) -> None:
+    cutoff = now - 86400
+    stale_keys = {key for key, seen_at in _alert_state_seen.items() if seen_at < cutoff}
+    for key in stale_keys:
+        _alert_cooldowns.pop(key, None)
+        _alert_zone_active.pop(key, None)
+        _alert_level_sides.pop(key, None)
+        _alert_state_seen.pop(key, None)
 
 
 async def _asset_type_for_symbol(db: Database, symbol: str) -> str:
