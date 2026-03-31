@@ -11,7 +11,14 @@ from src.data.macro import DXYData, FearGreedData
 from src.signals.models import CompositeScore
 from src.ta.indicators import obv_divergence, volume_confirmation
 from src.ta.signals import TASignal
-from src.ta.swings import compute_fibonacci, detect_stop_hunt, get_last_swing
+from src.ta.swings import (
+    compute_fibonacci,
+    detect_break_of_structure,
+    detect_fair_value_gaps,
+    detect_order_blocks,
+    detect_stop_hunt,
+    get_last_swing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +443,78 @@ def generate_crypto_trade_signal(
                     description=str(latest_hunt["description"]),
                 )
             )
+
+        if (
+            ta_signal._high is not None
+            and ta_signal._low is not None
+            and ta_signal._close is not None
+            and ta_signal._open is not None
+        ):
+            fvgs = detect_fair_value_gaps(
+                ta_signal._high,
+                ta_signal._low,
+                ta_signal._close,
+                ta_signal._open,
+            )
+            recent_fvgs = [
+                gap for gap in fvgs if int(gap["index"]) > len(ta_signal._close) - 20
+            ]
+            for fvg in sorted(recent_fvgs, key=lambda gap: int(gap["index"]), reverse=True):
+                if not (float(fvg["bottom"]) <= current_price <= float(fvg["top"])):
+                    continue
+                factors.append(
+                    ConfluenceFactor(
+                        name="fair_value_gap",
+                        direction="bullish" if fvg["type"] == "bullish_fvg" else "bearish",
+                        strength=0.7,
+                        description=(
+                            "Price is trading inside a recent bullish FVG - liquidity void can "
+                            "support a push higher"
+                            if fvg["type"] == "bullish_fvg"
+                            else "Price is trading inside a recent bearish FVG - liquidity void "
+                            "can pull price lower"
+                        ),
+                    )
+                )
+                break
+
+            bos_events = detect_break_of_structure(
+                ta_signal._high,
+                ta_signal._low,
+                ta_signal._close,
+            )
+            recent_bos = [
+                bos for bos in bos_events if int(bos["index"]) > len(ta_signal._close) - 5
+            ]
+            if recent_bos:
+                latest_bos = recent_bos[-1]
+                factors.append(
+                    ConfluenceFactor(
+                        name="break_of_structure",
+                        direction="bullish" if latest_bos["type"] == "bullish_bos" else "bearish",
+                        strength=0.85,
+                        description=str(latest_bos["description"]),
+                    )
+                )
+
+            order_blocks = detect_order_blocks(
+                ta_signal._high,
+                ta_signal._low,
+                ta_signal._close,
+                ta_signal._open,
+            )
+            for block in sorted(order_blocks, key=lambda ob: int(ob["index"]), reverse=True):
+                if not (float(block["bottom"]) <= current_price <= float(block["top"])):
+                    continue
+                factors.append(
+                    ConfluenceFactor(
+                        name="order_block",
+                        direction="bullish" if block["type"] == "bullish_ob" else "bearish",
+                        strength=0.75,
+                        description=str(block["description"]),
+                    )
+                )
+                break
 
     event_type = str(event_data.get("event_type", "")) if event_data is not None else ""
     remaining = _event_float(event_data, "remaining_drift_pct") or 0.0

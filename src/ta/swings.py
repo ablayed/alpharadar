@@ -174,3 +174,177 @@ def detect_stop_hunt(
                 )
 
     return hunts
+
+
+def detect_fair_value_gaps(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    open_: np.ndarray,
+) -> list[dict[str, float | int | str]]:
+    high_array = np.asarray(high, dtype=np.float64)
+    low_array = np.asarray(low, dtype=np.float64)
+    close_array = np.asarray(close, dtype=np.float64)
+    open_array = np.asarray(open_, dtype=np.float64)
+    if not (
+        len(high_array) == len(low_array) == len(close_array) == len(open_array)
+    ):
+        raise ValueError("high, low, close, and open arrays must have matching lengths")
+
+    fvgs: list[dict[str, float | int | str]] = []
+    for index in range(2, len(close_array)):
+        if high_array[index - 2] < low_array[index]:
+            top = float(low_array[index])
+            bottom = float(high_array[index - 2])
+            fvgs.append(
+                {
+                    "index": index,
+                    "type": "bullish_fvg",
+                    "top": top,
+                    "bottom": bottom,
+                    "midpoint": float((top + bottom) / 2),
+                    "description": (
+                        f"Bullish FVG: liquidity void between {bottom:.2f} and {top:.2f}"
+                    ),
+                }
+            )
+
+        if low_array[index - 2] > high_array[index]:
+            top = float(low_array[index - 2])
+            bottom = float(high_array[index])
+            fvgs.append(
+                {
+                    "index": index,
+                    "type": "bearish_fvg",
+                    "top": top,
+                    "bottom": bottom,
+                    "midpoint": float((top + bottom) / 2),
+                    "description": (
+                        f"Bearish FVG: liquidity void between {bottom:.2f} and {top:.2f}"
+                    ),
+                }
+            )
+
+    return fvgs
+
+
+def detect_break_of_structure(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    order: int = 5,
+) -> list[dict[str, float | int | str]]:
+    high_array = np.asarray(high, dtype=np.float64)
+    low_array = np.asarray(low, dtype=np.float64)
+    close_array = np.asarray(close, dtype=np.float64)
+    if not (len(high_array) == len(low_array) == len(close_array)):
+        raise ValueError("high, low, and close arrays must have matching lengths")
+
+    swing_highs, swing_lows = detect_swing_points(high_array, low_array, order)
+    bos_events: list[dict[str, float | int | str]] = []
+
+    for swing_high in swing_highs:
+        for index in range(swing_high.index + 1, min(swing_high.index + 30, len(close_array))):
+            if close_array[index] > high_array[swing_high.index]:
+                bos_events.append(
+                    {
+                        "index": index,
+                        "type": "bullish_bos",
+                        "broken_level": float(high_array[swing_high.index]),
+                        "close_price": float(close_array[index]),
+                        "description": (
+                            "Bullish BOS: closed above previous high's wick at "
+                            f"{high_array[swing_high.index]:.2f}"
+                        ),
+                    }
+                )
+                break
+
+    for swing_low in swing_lows:
+        for index in range(swing_low.index + 1, min(swing_low.index + 30, len(close_array))):
+            if close_array[index] < low_array[swing_low.index]:
+                bos_events.append(
+                    {
+                        "index": index,
+                        "type": "bearish_bos",
+                        "broken_level": float(low_array[swing_low.index]),
+                        "close_price": float(close_array[index]),
+                        "description": (
+                            "Bearish BOS: closed below previous low's wick at "
+                            f"{low_array[swing_low.index]:.2f}"
+                        ),
+                    }
+                )
+                break
+
+    bos_events.sort(key=lambda event: (int(event["index"]), str(event["type"])))
+    return bos_events
+
+
+def detect_order_blocks(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    open_: np.ndarray,
+    order: int = 5,
+) -> list[dict[str, float | int | str]]:
+    high_array = np.asarray(high, dtype=np.float64)
+    low_array = np.asarray(low, dtype=np.float64)
+    close_array = np.asarray(close, dtype=np.float64)
+    open_array = np.asarray(open_, dtype=np.float64)
+    if not (
+        len(high_array) == len(low_array) == len(close_array) == len(open_array)
+    ):
+        raise ValueError("high, low, close, and open arrays must have matching lengths")
+
+    bos_events = detect_break_of_structure(high_array, low_array, close_array, order)
+    order_blocks: list[dict[str, float | int | str]] = []
+    seen_blocks: set[tuple[str, int]] = set()
+
+    for bos in bos_events:
+        index = int(bos["index"])
+        start = max(index - 10, 0)
+        if bos["type"] == "bearish_bos":
+            for candle_index in range(index - 1, start - 1, -1):
+                if close_array[candle_index] > open_array[candle_index]:
+                    block_key = ("bearish_ob", candle_index)
+                    if block_key in seen_blocks:
+                        break
+                    seen_blocks.add(block_key)
+                    order_blocks.append(
+                        {
+                            "index": candle_index,
+                            "type": "bearish_ob",
+                            "top": float(high_array[candle_index]),
+                            "bottom": float(low_array[candle_index]),
+                            "midpoint": float((high_array[candle_index] + low_array[candle_index]) / 2),
+                            "description": (
+                                f"Bearish OB zone: {low_array[candle_index]:.2f} to "
+                                f"{high_array[candle_index]:.2f} - expect resistance here"
+                            ),
+                        }
+                    )
+                    break
+        elif bos["type"] == "bullish_bos":
+            for candle_index in range(index - 1, start - 1, -1):
+                if close_array[candle_index] < open_array[candle_index]:
+                    block_key = ("bullish_ob", candle_index)
+                    if block_key in seen_blocks:
+                        break
+                    seen_blocks.add(block_key)
+                    order_blocks.append(
+                        {
+                            "index": candle_index,
+                            "type": "bullish_ob",
+                            "top": float(high_array[candle_index]),
+                            "bottom": float(low_array[candle_index]),
+                            "midpoint": float((high_array[candle_index] + low_array[candle_index]) / 2),
+                            "description": (
+                                f"Bullish OB zone: {low_array[candle_index]:.2f} to "
+                                f"{high_array[candle_index]:.2f} - expect support here"
+                            ),
+                        }
+                    )
+                    break
+
+    return order_blocks

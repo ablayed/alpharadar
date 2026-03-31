@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import aiosqlite
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -129,6 +130,9 @@ def _help_text() -> str:
         "/signals NVDA  Show the full signal stack for one symbol\n"
         "/trade NVDA  Generate a structured trade setup for one symbol\n"
         "/trades  Scan the watchlist for active trade setups\n"
+        "/log BTC 68500 0.015  Log that you entered a trade\n"
+        "/close BTC 69500 tp1  Record how a trade was closed\n"
+        "/journal  Show realized trading performance\n"
         "/portfolio  Show tracked trade risk and stale positions\n"
         "/ta NVDA  Compute local technical analysis for one symbol\n"
         "/alerts  Show real-time alert pipeline status\n"
@@ -246,6 +250,184 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     await update.message.reply_text(tracker.format_status(), parse_mode="HTML")
+
+
+async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /log <SYMBOL> <ENTRY_PRICE> <SIZE>\n"
+            "Example: /log BTC 68500 0.015\n"
+            "Example: /log SOL 87.50 10"
+        )
+        return
+
+    symbol = context.args[0].strip().upper()
+    try:
+        entry_price = float(context.args[1])
+        size = float(context.args[2])
+    except ValueError:
+        await update.message.reply_text("Price and size must be numbers.")
+        return
+
+    if entry_price <= 0 or size <= 0:
+        await update.message.reply_text("Entry price and size must be greater than zero.")
+        return
+
+    trade = await activate_logged_trade(_db_from_context(context).db_path, symbol, entry_price, size)
+    if trade is None:
+        await update.message.reply_text(
+            f"No pending trade signal for {html.escape(symbol)}.\n"
+            f"Run /trade {html.escape(symbol)} first to generate a setup."
+        )
+        return
+
+    portfolio_tracker = context.application.bot_data.get("portfolio_tracker")
+    if isinstance(portfolio_tracker, PortfolioTracker):
+        asset_type = await _asset_type_for_symbol(_db_from_context(context), symbol)
+        portfolio_tracker.add_position(
+            OpenPosition(
+                symbol=symbol,
+                asset_type=asset_type,
+                direction=str(trade["direction"]),
+                entry_price=float(trade["entry_price"]),
+                stop_loss=float(trade["stop_loss"]),
+                tp1=float(trade["tp1"]),
+                risk_pct=float(trade["risk_pct"] or 1.0),
+                opened_at=datetime.now(ZoneInfo("UTC")).timestamp(),
+            )
+        )
+
+    direction = str(trade["direction"])
+    direction_label = "LONG" if direction == "LONG" else "SHORT"
+    text = (
+        f"<b>TRADE LOGGED: {html.escape(symbol)}</b>\n\n"
+        f"Direction: {'🟢' if direction == 'LONG' else '🔴'} {direction_label}\n"
+        f"Entry: {_format_trade_price(float(trade['entry_price']))} x {float(trade['entry_size']):g}\n"
+        f"Cost: {_format_trade_price(float(trade['entry_cost']))}\n"
+        f"Risk: £{float(trade['risk_amount']):.2f}\n\n"
+        f"SL: {_format_trade_price(float(trade['stop_loss']))} | "
+        f"TP1: {_format_trade_price(float(trade['tp1']))} | "
+        f"TP2: {_format_trade_price(float(trade['tp2']))} | "
+        f"TP3: {_format_trade_price(float(trade['tp3']))}\n\n"
+        "This trade is now active. I will flag TP and SL touches as live prices update.\n"
+        f"Use /close {html.escape(symbol)} <EXIT_PRICE> [reason] when you exit."
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /close <SYMBOL> <EXIT_PRICE> [reason]\n"
+            "Reasons: tp1, tp2, tp3, sl, manual, breakeven, expired"
+        )
+        return
+
+    symbol = context.args[0].strip().upper()
+    try:
+        exit_price = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Exit price must be a number.")
+        return
+
+    if exit_price <= 0:
+        await update.message.reply_text("Exit price must be greater than zero.")
+        return
+
+    reason = context.args[2].strip().lower() if len(context.args) > 2 else "manual"
+    trade = await close_logged_trade(_db_from_context(context).db_path, symbol, exit_price, reason)
+    if trade is None:
+        await update.message.reply_text(f"No active trade for {html.escape(symbol)}.")
+        return
+
+    portfolio_tracker = context.application.bot_data.get("portfolio_tracker")
+    if isinstance(portfolio_tracker, PortfolioTracker):
+        portfolio_tracker.remove_position(symbol)
+
+    pnl = float(trade["realized_pnl"])
+    emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+    text = (
+        f"{emoji} <b>TRADE CLOSED: {html.escape(symbol)}</b>\n\n"
+        f"Entry: {_format_trade_price(float(trade['entry_price']))} | "
+        f"Exit: {_format_trade_price(float(trade['exit_price']))}\n"
+        f"P&L: £{pnl:.2f} ({float(trade['realized_pnl_pct']):+.1f}%)\n"
+        f"R-multiple: {float(trade['r_multiple']):+.1f}R\n"
+        f"Reason: {html.escape(str(trade['exit_reason']))}\n\n"
+        "Use /journal to review realized performance."
+    )
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def journal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    snapshot = await load_trade_journal_snapshot(_db_from_context(context).db_path)
+    total_trades = int(snapshot["total_trades"])
+    active_trades = int(snapshot["active_trades"])
+    if total_trades == 0:
+        await update.message.reply_text(
+            "📓 <b>TRADING JOURNAL</b>\n\n"
+            f"No closed trades yet ({active_trades} active).\n"
+            "Use /log to record an entry, then /close when you exit.",
+            parse_mode="HTML",
+        )
+        return
+
+    profit_factor = snapshot["profit_factor"]
+    profit_factor_text = "inf" if profit_factor == float("inf") else f"{float(profit_factor):.2f}"
+    lines = [
+        "📓 <b>TRADING JOURNAL</b>",
+        "",
+        "<b>Overall Performance:</b>",
+        f"  Total trades: {total_trades} ({active_trades} active)",
+        f"  Win rate: {float(snapshot['win_rate']):.1f}% "
+        f"({int(snapshot['wins'])}W / {int(snapshot['losses'])}L)",
+        f"  Profit factor: {profit_factor_text}",
+        f"  Average R: {float(snapshot['avg_r']):+.2f}R",
+        "",
+        "<b>P&L Summary:</b>",
+        f"  Total profit: £{float(snapshot['total_profit']):.2f}",
+        f"  Total loss: £{float(snapshot['total_loss']):.2f}",
+        f"  Net P&L: £{float(snapshot['net_pnl']):.2f}",
+        f"  Best trade: £{float(snapshot['best_trade']):.2f}",
+        f"  Worst trade: £{float(snapshot['worst_trade']):.2f}",
+        "",
+        "<b>Target Hit Rates:</b>",
+        f"  TP1 hit rate: {float(snapshot['tp1_hit_rate']):.0f}%",
+        f"  SL hit rate: {float(snapshot['sl_hit_rate']):.0f}%",
+    ]
+
+    recent_trades = snapshot["recent_trades"]
+    if isinstance(recent_trades, list) and recent_trades:
+        lines.extend(["", "<b>Recent Trades:</b>"])
+        for trade in recent_trades:
+            pnl = float(trade["realized_pnl"])
+            emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+            lines.append(
+                f"  {emoji} {html.escape(str(trade['symbol']))} {html.escape(str(trade['direction']))} | "
+                f"{html.escape(str(trade['exit_reason']))} | "
+                f"£{pnl:.2f} ({float(trade['r_multiple']):+.1f}R)"
+            )
+
+    suggestions = snapshot["suggestions"]
+    if isinstance(suggestions, list) and suggestions:
+        lines.extend(["", "<b>Areas to Improve:</b>"])
+        lines.extend(f"  {html.escape(str(item), quote=False)}" for item in suggestions)
+
+    if update.effective_chat is None:
+        return
+    await _send_long_message(context.bot, update.effective_chat.id, "\n".join(lines))
 
 
 async def funding_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -734,26 +916,17 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             if portfolio_notes:
                 trade_text += f"\n\n{portfolio_notes}"
-            portfolio_tracker.add_position(
-                OpenPosition(
-                    symbol=symbol,
-                    asset_type=price_item.asset_type.value,
-                    direction=signal.direction,
-                    entry_price=signal.entry_high,
-                    stop_loss=signal.stop_loss,
-                    tp1=signal.tp1,
-                    risk_pct=signal.suggested_risk_pct,
-                    opened_at=datetime.now(ZoneInfo("UTC")).timestamp(),
-                )
-            )
-            trade_text += "\n\n<i>This setup is now tracked in /portfolio.</i>"
+        trade_text += (
+            f"\n\n<i>When you actually enter, log it with "
+            f"/log {html.escape(symbol)} &lt;ENTRY_PRICE&gt; &lt;SIZE&gt;.</i>"
+        )
         await _send_long_message(
             context.bot,
             update.effective_chat.id,
             trade_text,
             initial_message=msg,
         )
-        await aggregator.tracker.log_prediction(
+        prediction_id = await aggregator.tracker.log_prediction(
             symbol=symbol,
             asset_type=price_item.asset_type.value,
             predicted_direction=_trade_direction_to_prediction(signal.direction),
@@ -764,6 +937,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             event_type=_event_type_for_symbol(data, symbol),
             predicted_target=signal.tp2,
         )
+        await save_signal_to_log(signal, _db_from_context(context).db_path, signal_id=prediction_id)
     except Exception as exc:
         logger.exception("Trade command failed for %s", symbol)
         escaped_error = html.escape(str(exc), quote=False)
@@ -846,7 +1020,7 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             lines.append(f"   <i>{html.escape(signal.reasoning[:150], quote=False)}</i>")
             lines.append("")
-            await aggregator.tracker.log_prediction(
+            prediction_id = await aggregator.tracker.log_prediction(
                 symbol=signal.symbol,
                 asset_type=price_item.asset_type.value,
                 predicted_direction=_trade_direction_to_prediction(signal.direction),
@@ -857,10 +1031,12 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 event_type=_event_type_for_symbol(data, signal.symbol),
                 predicted_target=signal.tp2,
             )
+            await save_signal_to_log(signal, _db_from_context(context).db_path, signal_id=prediction_id)
 
         lines.append(
             "<b>NOT financial advice.</b> Never risk more than 2% per trade.\n"
-            "Use /trade &lt;symbol&gt; for full details on any setup."
+            "Use /trade &lt;symbol&gt; for full details on any setup.\n"
+            "After you actually enter, record it with /log &lt;symbol&gt; &lt;entry_price&gt; &lt;size&gt;."
         )
         if update.effective_chat is None:
             return
@@ -1262,6 +1438,495 @@ def _db_from_context(context: ContextTypes.DEFAULT_TYPE) -> Database:
     if not isinstance(db, Database):
         raise RuntimeError("Database instance missing from bot_data")
     return db
+
+
+async def save_signal_to_log(
+    signal: TradeSignal,
+    db_path: str,
+    *,
+    signal_id: int | None = None,
+) -> int:
+    async with aiosqlite.connect(db_path) as connection:
+        cursor = await connection.execute(
+            """
+            INSERT INTO trade_log (
+                signal_id, symbol, direction, timeframe, confluence_count, status,
+                stop_loss, tp1, tp2, tp3, risk_pct
+            )
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                signal.symbol.upper(),
+                signal.direction.upper(),
+                signal.timeframe,
+                signal.confluence_count,
+                signal.stop_loss,
+                signal.tp1,
+                signal.tp2,
+                signal.tp3,
+                signal.suggested_risk_pct,
+            ),
+        )
+        await connection.commit()
+        return int(cursor.lastrowid)
+
+
+async def activate_logged_trade(
+    db_path: str,
+    symbol: str,
+    entry_price: float,
+    size: float,
+) -> dict[str, object] | None:
+    timestamp = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(db_path) as connection:
+        cursor = await connection.execute(
+            """
+            SELECT id, direction, timeframe, confluence_count, stop_loss, tp1, tp2, tp3, risk_pct
+            FROM trade_log
+            WHERE symbol = ? AND status = 'pending'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        trade_id, direction, timeframe, confluence_count, stop_loss, tp1, tp2, tp3, risk_pct = row
+        risk_amount = abs(entry_price - float(stop_loss)) * size
+        entry_cost = entry_price * size
+
+        await connection.execute(
+            """
+            UPDATE trade_log
+            SET status = 'active',
+                entry_price = ?,
+                entry_size = ?,
+                entry_cost = ?,
+                risk_amount = ?,
+                entered_at = ?
+            WHERE id = ?
+            """,
+            (entry_price, size, entry_cost, risk_amount, timestamp, trade_id),
+        )
+        await connection.commit()
+
+    return {
+        "id": int(trade_id),
+        "symbol": symbol.upper(),
+        "direction": str(direction),
+        "timeframe": timeframe,
+        "confluence_count": int(confluence_count or 0),
+        "entry_price": float(entry_price),
+        "entry_size": float(size),
+        "entry_cost": float(entry_cost),
+        "risk_amount": float(risk_amount),
+        "risk_pct": float(risk_pct or 0.0),
+        "stop_loss": float(stop_loss),
+        "tp1": float(tp1),
+        "tp2": float(tp2),
+        "tp3": float(tp3),
+    }
+
+
+async def close_logged_trade(
+    db_path: str,
+    symbol: str,
+    exit_price: float,
+    reason: str = "manual",
+) -> dict[str, object] | None:
+    normalized_reason = reason.strip().lower() or "manual"
+    timestamp = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+
+    async with aiosqlite.connect(db_path) as connection:
+        connection.row_factory = aiosqlite.Row
+        cursor = await connection.execute(
+            """
+            SELECT id, direction, entry_price, entry_size, risk_amount,
+                   tp1_hit, tp1_hit_at, tp2_hit, tp2_hit_at, tp3_hit, tp3_hit_at, sl_hit, sl_hit_at
+            FROM trade_log
+            WHERE symbol = ? AND status = 'active'
+            ORDER BY entered_at DESC, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        entry_price = row["entry_price"]
+        entry_size = row["entry_size"]
+        if entry_price is None or entry_size is None:
+            return None
+
+        entry = float(entry_price)
+        size = float(entry_size)
+        risk_amount = float(row["risk_amount"] or 0.0)
+        direction = str(row["direction"])
+
+        if direction == "LONG":
+            pnl = (exit_price - entry) * size
+        else:
+            pnl = (entry - exit_price) * size
+        pnl_pct = (pnl / (entry * size)) * 100 if entry > 0 and size > 0 else 0.0
+        r_multiple = pnl / risk_amount if risk_amount > 0 else 0.0
+
+        if normalized_reason == "sl":
+            status = "closed_sl"
+        elif normalized_reason in {"tp1", "tp2", "tp3"}:
+            status = f"closed_{normalized_reason}"
+        elif normalized_reason == "expired":
+            status = "expired"
+        else:
+            status = "closed_manual"
+
+        tp1_hit = int(row["tp1_hit"] or (normalized_reason in {"tp1", "tp2", "tp3"}))
+        tp2_hit = int(row["tp2_hit"] or (normalized_reason in {"tp2", "tp3"}))
+        tp3_hit = int(row["tp3_hit"] or (normalized_reason == "tp3"))
+        sl_hit = int(row["sl_hit"] or (normalized_reason == "sl"))
+        tp1_hit_at = row["tp1_hit_at"] or (timestamp if normalized_reason in {"tp1", "tp2", "tp3"} else None)
+        tp2_hit_at = row["tp2_hit_at"] or (timestamp if normalized_reason in {"tp2", "tp3"} else None)
+        tp3_hit_at = row["tp3_hit_at"] or (timestamp if normalized_reason == "tp3" else None)
+        sl_hit_at = row["sl_hit_at"] or (timestamp if normalized_reason == "sl" else None)
+
+        await connection.execute(
+            """
+            UPDATE trade_log
+            SET status = ?,
+                exit_price = ?,
+                exit_reason = ?,
+                closed_at = ?,
+                realized_pnl = ?,
+                realized_pnl_pct = ?,
+                r_multiple = ?,
+                tp1_hit = ?,
+                tp1_hit_at = ?,
+                tp2_hit = ?,
+                tp2_hit_at = ?,
+                tp3_hit = ?,
+                tp3_hit_at = ?,
+                sl_hit = ?,
+                sl_hit_at = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                exit_price,
+                normalized_reason,
+                timestamp,
+                pnl,
+                pnl_pct,
+                r_multiple,
+                tp1_hit,
+                tp1_hit_at,
+                tp2_hit,
+                tp2_hit_at,
+                tp3_hit,
+                tp3_hit_at,
+                sl_hit,
+                sl_hit_at,
+                int(row["id"]),
+            ),
+        )
+        await connection.commit()
+
+    return {
+        "id": int(row["id"]),
+        "symbol": symbol.upper(),
+        "direction": direction,
+        "entry_price": entry,
+        "exit_price": float(exit_price),
+        "exit_reason": normalized_reason,
+        "status": status,
+        "realized_pnl": float(pnl),
+        "realized_pnl_pct": float(pnl_pct),
+        "r_multiple": float(r_multiple),
+    }
+
+
+async def load_trade_journal_snapshot(db_path: str) -> dict[str, object]:
+    base_filter = "(status LIKE 'closed_%' OR status = 'expired')"
+    async with aiosqlite.connect(db_path) as connection:
+        total_cursor = await connection.execute(
+            f"SELECT COUNT(*) FROM trade_log WHERE {base_filter}"
+        )
+        wins_cursor = await connection.execute(
+            f"SELECT COUNT(*) FROM trade_log WHERE realized_pnl > 0 AND {base_filter}"
+        )
+        losses_cursor = await connection.execute(
+            f"SELECT COUNT(*) FROM trade_log WHERE realized_pnl <= 0 AND {base_filter}"
+        )
+        active_cursor = await connection.execute(
+            "SELECT COUNT(*) FROM trade_log WHERE status = 'active'"
+        )
+        pnl_cursor = await connection.execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN realized_pnl > 0 THEN realized_pnl ELSE 0 END),
+                SUM(CASE WHEN realized_pnl <= 0 THEN realized_pnl ELSE 0 END),
+                SUM(realized_pnl),
+                AVG(r_multiple),
+                MAX(realized_pnl),
+                MIN(realized_pnl)
+            FROM trade_log
+            WHERE {base_filter}
+            """
+        )
+        tp1_cursor = await connection.execute(
+            f"SELECT SUM(tp1_hit), COUNT(*) FROM trade_log WHERE {base_filter}"
+        )
+        sl_cursor = await connection.execute(
+            f"SELECT COUNT(*) FROM trade_log WHERE sl_hit = 1 AND {base_filter}"
+        )
+        recent_cursor = await connection.execute(
+            f"""
+            SELECT symbol, direction, entry_price, exit_price, realized_pnl, r_multiple, exit_reason, closed_at
+            FROM trade_log
+            WHERE {base_filter}
+            ORDER BY closed_at DESC, id DESC
+            LIMIT 5
+            """
+        )
+
+        total_row = await total_cursor.fetchone()
+        wins_row = await wins_cursor.fetchone()
+        losses_row = await losses_cursor.fetchone()
+        active_row = await active_cursor.fetchone()
+        pnl_row = await pnl_cursor.fetchone()
+        tp1_row = await tp1_cursor.fetchone()
+        sl_row = await sl_cursor.fetchone()
+        recent_rows = await recent_cursor.fetchall()
+
+    total_trades = int(total_row[0] or 0)
+    wins = int(wins_row[0] or 0)
+    losses = int(losses_row[0] or 0)
+    active_trades = int(active_row[0] or 0)
+    total_profit = float((pnl_row[0] if pnl_row else 0.0) or 0.0)
+    total_loss = float((pnl_row[1] if pnl_row else 0.0) or 0.0)
+    net_pnl = float((pnl_row[2] if pnl_row else 0.0) or 0.0)
+    avg_r = float((pnl_row[3] if pnl_row else 0.0) or 0.0)
+    best_trade = float((pnl_row[4] if pnl_row else 0.0) or 0.0)
+    worst_trade = float((pnl_row[5] if pnl_row else 0.0) or 0.0)
+    tp1_hits = int((tp1_row[0] if tp1_row else 0) or 0)
+    tp1_total = int((tp1_row[1] if tp1_row else 0) or 0)
+    sl_hits = int((sl_row[0] if sl_row else 0) or 0)
+
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+    tp1_hit_rate = (tp1_hits / tp1_total * 100) if tp1_total > 0 else 0.0
+    sl_hit_rate = (sl_hits / total_trades * 100) if total_trades > 0 else 0.0
+    if total_loss < 0:
+        profit_factor = abs(total_profit / total_loss)
+    elif total_profit > 0:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0.0
+
+    suggestions: list[str] = []
+    if win_rate < 50 and total_trades >= 5:
+        suggestions.append("📉 Win rate below 50% - tighten entry criteria or wait for cleaner setups.")
+    if avg_r < 1.0 and total_trades >= 5:
+        suggestions.append("📉 Average R below 1.0 - let winners run or cut losers faster.")
+    if profit_factor != float("inf") and profit_factor < 1.5 and total_trades >= 5:
+        suggestions.append("📉 Profit factor below 1.5 - risk/reward needs work.")
+    if sl_hits > total_trades * 0.5 and total_trades >= 5:
+        suggestions.append("📉 Stopped out on 50%+ of trades - stops may be too tight.")
+    if total_trades < 10:
+        suggestions.append("📊 Too few trades for strong analysis - keep logging.")
+    if win_rate >= 55 and avg_r >= 1.5 and total_trades >= 5:
+        suggestions.append("✅ Win rate and R-multiple are both solid. Stay consistent.")
+
+    recent_trades = [
+        {
+            "symbol": row[0],
+            "direction": row[1],
+            "entry_price": float(row[2] or 0.0),
+            "exit_price": float(row[3] or 0.0),
+            "realized_pnl": float(row[4] or 0.0),
+            "r_multiple": float(row[5] or 0.0),
+            "exit_reason": row[6] or "manual",
+            "closed_at": row[7],
+        }
+        for row in recent_rows
+    ]
+
+    return {
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "active_trades": active_trades,
+        "win_rate": win_rate,
+        "total_profit": total_profit,
+        "total_loss": total_loss,
+        "net_pnl": net_pnl,
+        "avg_r": avg_r,
+        "best_trade": best_trade,
+        "worst_trade": worst_trade,
+        "profit_factor": profit_factor,
+        "tp1_hit_rate": tp1_hit_rate,
+        "sl_hit_rate": sl_hit_rate,
+        "recent_trades": recent_trades,
+        "suggestions": suggestions,
+    }
+
+
+async def check_trade_levels(
+    symbol: str,
+    current_price: float,
+    db_path: str,
+    bot: object,
+    chat_id: int | str,
+    *,
+    portfolio_tracker: PortfolioTracker | None = None,
+) -> None:
+    timestamp = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(db_path) as connection:
+        cursor = await connection.execute(
+            """
+            SELECT id, direction, entry_price, tp1, tp2, tp3, stop_loss,
+                   tp1_hit, tp2_hit, tp3_hit, sl_hit
+            FROM trade_log
+            WHERE symbol = ? AND status = 'active'
+            """,
+            (symbol.upper(),),
+        )
+        trades = await cursor.fetchall()
+
+        for trade in trades:
+            trade_id, direction, entry_price, tp1, tp2, tp3, stop_loss, tp1_hit, tp2_hit, tp3_hit, sl_hit = trade
+            if tp3_hit or sl_hit or entry_price is None:
+                continue
+
+            stop_triggered = (
+                direction == "LONG" and current_price <= float(stop_loss)
+            ) or (
+                direction == "SHORT" and current_price >= float(stop_loss)
+            )
+            if stop_triggered:
+                await connection.execute(
+                    "UPDATE trade_log SET sl_hit = 1, sl_hit_at = ? WHERE id = ?",
+                    (timestamp, trade_id),
+                )
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🔴 <b>STOP LOSS HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"Price reached {_format_trade_price(current_price)} "
+                            f"(SL was {_format_trade_price(float(stop_loss))}).\n"
+                            f"Use /close {html.escape(symbol.upper())} {current_price:.8g} sl to log the exit."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("Failed to send SL alert for %s", symbol.upper())
+                continue
+
+            tp1_triggered = (
+                not tp1_hit
+                and (
+                    (direction == "LONG" and current_price >= float(tp1))
+                    or (direction == "SHORT" and current_price <= float(tp1))
+                )
+            )
+            if tp1_triggered:
+                await connection.execute(
+                    "UPDATE trade_log SET tp1_hit = 1, tp1_hit_at = ? WHERE id = ?",
+                    (timestamp, trade_id),
+                )
+                if portfolio_tracker is not None:
+                    portfolio_tracker.mark_tp1_hit(symbol)
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🎯 <b>TP1 HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"Price reached {_format_trade_price(current_price)}.\n"
+                            f"Sell 1/3 now and move your stop to breakeven "
+                            f"({_format_trade_price(float(entry_price))}).\n\n"
+                            f"Use /close {html.escape(symbol.upper())} {current_price:.8g} tp1 "
+                            "if you are taking full profit here."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("Failed to send TP1 alert for %s", symbol.upper())
+
+            tp2_triggered = (
+                bool(tp1_hit)
+                and not tp2_hit
+                and (
+                    (direction == "LONG" and current_price >= float(tp2))
+                    or (direction == "SHORT" and current_price <= float(tp2))
+                )
+            )
+            if tp2_triggered:
+                await connection.execute(
+                    "UPDATE trade_log SET tp2_hit = 1, tp2_hit_at = ? WHERE id = ?",
+                    (timestamp, trade_id),
+                )
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🎯🎯 <b>TP2 HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"Price reached {_format_trade_price(current_price)}.\n"
+                            f"Sell another 1/3 and move your stop to TP1 "
+                            f"({_format_trade_price(float(tp1))})."
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("Failed to send TP2 alert for %s", symbol.upper())
+
+            tp3_triggered = (
+                bool(tp2_hit)
+                and not tp3_hit
+                and (
+                    (direction == "LONG" and current_price >= float(tp3))
+                    or (direction == "SHORT" and current_price <= float(tp3))
+                )
+            )
+            if tp3_triggered:
+                await connection.execute(
+                    "UPDATE trade_log SET tp3_hit = 1, tp3_hit_at = ? WHERE id = ?",
+                    (timestamp, trade_id),
+                )
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🎯🎯🎯 <b>TP3 HIT: {html.escape(symbol.upper())}</b>\n\n"
+                            f"Full target reached at {_format_trade_price(current_price)}.\n"
+                            f"Use /close {html.escape(symbol.upper())} {current_price:.8g} tp3"
+                        ),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("Failed to send TP3 alert for %s", symbol.upper())
+
+        await connection.commit()
+
+
+async def _asset_type_for_symbol(db: Database, symbol: str) -> str:
+    async with aiosqlite.connect(db.db_path) as connection:
+        cursor = await connection.execute(
+            """
+            SELECT asset_type
+            FROM watchlist
+            WHERE symbol = ? AND is_active = 1
+            ORDER BY asset_type = 'crypto' DESC
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return "crypto"
+    asset_type = str(row[0]).lower()
+    return asset_type if asset_type in {"stock", "crypto"} else "crypto"
 
 
 def _aggregator_from_context(context: ContextTypes.DEFAULT_TYPE) -> DataAggregator:

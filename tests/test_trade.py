@@ -287,6 +287,95 @@ def _factor_raw_series() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray
     return close, high, low, volume, open_
 
 
+def _smc_raw_series() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    close = np.array(
+        [
+            96.0,
+            97.0,
+            98.0,
+            99.0,
+            100.0,
+            109.0,
+            104.0,
+            103.0,
+            102.0,
+            101.0,
+            104.0,
+            100.0,
+            111.0,
+            107.0,
+            106.0,
+            105.0,
+        ],
+        dtype=np.float64,
+    )
+    open_ = np.array(
+        [
+            95.0,
+            96.0,
+            97.0,
+            98.0,
+            99.0,
+            108.0,
+            105.0,
+            104.0,
+            103.0,
+            102.0,
+            103.0,
+            106.0,
+            109.0,
+            108.0,
+            107.0,
+            106.0,
+        ],
+        dtype=np.float64,
+    )
+    high = np.array(
+        [
+            97.0,
+            98.0,
+            99.0,
+            100.0,
+            101.0,
+            110.0,
+            105.0,
+            104.0,
+            103.0,
+            102.0,
+            105.0,
+            106.0,
+            112.0,
+            108.0,
+            107.0,
+            106.0,
+        ],
+        dtype=np.float64,
+    )
+    low = np.array(
+        [
+            94.0,
+            95.0,
+            96.0,
+            97.0,
+            98.0,
+            107.0,
+            103.0,
+            102.0,
+            101.0,
+            100.0,
+            103.0,
+            100.0,
+            108.0,
+            106.0,
+            105.0,
+            104.0,
+        ],
+        dtype=np.float64,
+    )
+    volume = np.full_like(close, 12.0)
+    return close, high, low, volume, open_
+
+
 def test_generate_trade_signal_builds_stock_setup() -> None:
     signal = generate_trade_signal(
         symbol="NVDA",
@@ -701,6 +790,52 @@ def test_generate_crypto_trade_signal_adds_obv_volume_and_stop_hunt_factors() ->
     assert "obv_divergence" in factor_names
     assert "volume" in factor_names
     assert "stop_hunt" in factor_names
+
+
+def test_generate_crypto_trade_signal_adds_smc_factors() -> None:
+    close, high, low, volume, open_ = _smc_raw_series()
+
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=106.0,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=106.0,
+            atr_value=2.5,
+            atr_pct=2.4,
+            bb_upper=118.0,
+            bb_lower=99.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.79,
+            rsi_signal="oversold",
+            rsi_value=29.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.4,
+            close=close,
+            high=high,
+            low=low,
+            volume=volume,
+            open_=open_,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.24,
+            agreement=0.82,
+            direction="buy",
+            breakdown={"sentiment": 0.09, "ta": 0.08, "event": 0.05},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bullish", confidence=0.84),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 4.0},
+        regime="risk_on",
+        btc_change_pct=2.0,
+    )
+
+    assert signal is not None
+    factor_names = {factor.name for factor in signal.confluence_factors}
+    assert "fair_value_gap" in factor_names
+    assert "break_of_structure" in factor_names
+    assert "order_block" in factor_names
 
 
 def test_generate_crypto_trade_signal_adds_funding_and_oi_bearish_factors() -> None:

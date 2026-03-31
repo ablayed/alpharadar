@@ -164,9 +164,50 @@ CREATE TABLE IF NOT EXISTS regime_history (
     vix_level TEXT
 );
 
+CREATE TABLE IF NOT EXISTS trade_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    timeframe TEXT,
+    confluence_count INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    entry_price REAL,
+    entry_size REAL,
+    entry_cost REAL,
+    entered_at TEXT,
+    stop_loss REAL NOT NULL,
+    tp1 REAL NOT NULL,
+    tp2 REAL NOT NULL,
+    tp3 REAL NOT NULL,
+    risk_pct REAL,
+    risk_amount REAL,
+    tp1_hit INTEGER NOT NULL DEFAULT 0,
+    tp1_hit_at TEXT,
+    tp2_hit INTEGER NOT NULL DEFAULT 0,
+    tp2_hit_at TEXT,
+    tp3_hit INTEGER NOT NULL DEFAULT 0,
+    tp3_hit_at TEXT,
+    sl_hit INTEGER NOT NULL DEFAULT 0,
+    sl_hit_at TEXT,
+    exit_price REAL,
+    exit_reason TEXT,
+    closed_at TEXT,
+    realized_pnl REAL,
+    realized_pnl_pct REAL,
+    r_multiple REAL,
+    user_notes TEXT,
+    lessons_learned TEXT,
+    FOREIGN KEY(signal_id) REFERENCES predictions(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_predictions_symbol ON predictions(symbol);
 CREATE INDEX IF NOT EXISTS idx_predictions_created ON predictions(created_at);
 CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome_recorded);
+CREATE INDEX IF NOT EXISTS idx_tradelog_symbol ON trade_log(symbol);
+CREATE INDEX IF NOT EXISTS idx_tradelog_status ON trade_log(status);
+CREATE INDEX IF NOT EXISTS idx_tradelog_created ON trade_log(created_at);
 """
 
 

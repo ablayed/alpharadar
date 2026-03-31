@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from telegram.ext import Application, ContextTypes
 
 from src.alerts import AlertPipeline, AlertSeverity
+from src.bot.handlers import save_signal_to_log
 from src.bot.messages import _send_long_message
 from src.config import settings
 from src.data.aggregator import DataAggregator
@@ -214,6 +215,11 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                 event_data=_event_payload_for_symbol(data, symbol),
                 regime=regime_key,
                 btc_change_pct=btc_change,
+                funding=data.funding.get(symbol),
+                oi=data.oi.get(symbol),
+                cme_gap=data.cme_gap if symbol == "BTC" else None,
+                fear_greed=data.fear_greed,
+                dxy=data.dxy,
             )
             if signal is not None:
                 signals.append(signal)
@@ -225,9 +231,12 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         signals.sort(key=lambda item: item.confidence, reverse=True)
 
         tracker = context.bot_data.get("tracker")
-        if tracker is not None:
-            for signal in signals:
-                await tracker.log_prediction(
+        db = context.bot_data.get("db")
+        db_path = db.db_path if isinstance(db, Database) else None
+        for signal in signals:
+            prediction_id: int | None = None
+            if tracker is not None:
+                prediction_id = await tracker.log_prediction(
                     symbol=signal.symbol,
                     asset_type="crypto",
                     predicted_direction="bullish" if signal.direction == "LONG" else "bearish",
@@ -237,6 +246,8 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                     reasoning=signal.reasoning,
                     predicted_target=signal.tp2,
                 )
+            if db_path is not None:
+                await save_signal_to_log(signal, db_path, signal_id=prediction_id)
 
         time_label = "MORNING" if hour < 12 else "EVENING"
         lines = [f"🎯 <b>{time_label} TRADE SCAN</b>  {len(signals)} setup(s) found", ""]
@@ -381,6 +392,12 @@ def _cache_briefing_snapshot(context: ContextTypes.DEFAULT_TYPE, data: BriefingD
     context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
     context.bot_data["ta_signals"] = data.ta_signals
     context.bot_data["agent_analysis"] = data.agent_analysis
+    context.bot_data["funding"] = data.funding
+    context.bot_data["oi"] = data.oi
+    context.bot_data["fear_greed"] = data.fear_greed
+    context.bot_data["dxy"] = data.dxy
+    context.bot_data["cme_gap"] = data.cme_gap
+    context.bot_data["btc_dominance"] = data.btc_dominance
 
 
 def _btc_change_pct(data: BriefingData) -> float:

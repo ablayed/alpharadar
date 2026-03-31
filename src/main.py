@@ -24,12 +24,16 @@ from src.bot.handlers import (
     alerts_command,
     analyze_command,
     briefing_command,
+    check_trade_levels,
+    close_command,
     corr_command,
     events_command,
     funding_command,
     handle_asset_type_callback,
     help_command,
     history_command,
+    journal_command,
+    log_command,
     playbook_command,
     portfolio_command,
     reflect_command,
@@ -81,6 +85,7 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     formatter = BriefingFormatter()
 
     application.bot_data["db"] = db
+    application.bot_data["db_path"] = db.db_path
     application.bot_data["aggregator"] = aggregator
     application.bot_data["formatter"] = formatter
     application.bot_data["sentiment_analyzer"] = aggregator.sentiment_analyzer
@@ -152,17 +157,27 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
 
     async def on_crypto_price(symbol: str, price: float) -> None:
         alert = pipeline.classify_severity(symbol, price, "crypto")
-        if alert is None:
-            return
-        pipeline.record_sent(alert)
+        if alert is not None:
+            pipeline.record_sent(alert)
+            try:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🚨 <b>CRYPTO ALERT</b> [{alert.severity.value.upper()}]\n\n{alert.message}",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                logger.exception("Failed to send crypto alert for %s", symbol.upper())
         try:
-            await application.bot.send_message(
-                chat_id=chat_id,
-                text=f"🚨 <b>CRYPTO ALERT</b> [{alert.severity.value.upper()}]\n\n{alert.message}",
-                parse_mode=ParseMode.HTML,
+            await check_trade_levels(
+                symbol,
+                price,
+                db.db_path,
+                application.bot,
+                chat_id,
+                portfolio_tracker=application.bot_data.get("portfolio_tracker"),
             )
         except Exception:
-            logger.exception("Failed to send crypto alert for %s", symbol.upper())
+            logger.exception("Failed to check trade levels for %s", symbol.upper())
 
     if crypto_symbols:
         ws_tasks["binance"] = application.create_task(
@@ -213,6 +228,9 @@ def main() -> None:
     application.add_handler(CommandHandler("signals", signals_command))
     application.add_handler(CommandHandler("trade", trade_command))
     application.add_handler(CommandHandler("trades", trades_command))
+    application.add_handler(CommandHandler("log", log_command))
+    application.add_handler(CommandHandler("close", close_command))
+    application.add_handler(CommandHandler("journal", journal_command))
     application.add_handler(CommandHandler("ta", ta_command))
     application.add_handler(CommandHandler("alerts", alerts_command))
     application.add_handler(CommandHandler("accuracy", accuracy_command))
