@@ -300,6 +300,9 @@ class BriefingFormatter:
         regime_section = self._format_market_regime(data)
         if regime_section:
             sections.append(regime_section)
+        macro_section = self._format_macro_context(data)
+        if macro_section:
+            sections.append(macro_section)
 
         if weekend:
             sections.extend(
@@ -377,6 +380,38 @@ class BriefingFormatter:
         if context:
             lines.append(f"<i>{self._escape(context)}</i>")
 
+        return "\n".join(lines)
+
+    def _format_macro_context(self, data: BriefingData) -> str:
+        lines = ["\U0001F310 <b>MACRO CONTEXT</b>"]
+
+        if data.fear_greed is not None:
+            emoji = "\U0001F630" if data.fear_greed.value < 25 else "\U0001F911" if data.fear_greed.value > 75 else "\U0001F610"
+            lines.append(
+                f"{emoji} Fear &amp; Greed: {data.fear_greed.value} "
+                f"({self._escape(data.fear_greed.classification)})"
+            )
+
+        if data.dxy is not None:
+            lines.append(
+                f"\U0001F4B5 Dollar (DXY): {data.dxy.current:.2f} "
+                f"({data.dxy.change_7d_pct:+.1f}% this week)"
+            )
+
+        if data.btc_dominance is not None:
+            lines.append(
+                f"\U0001F451 BTC Dominance: {data.btc_dominance.dominance_pct:.1f}% "
+                f"{self._escape(data.btc_dominance.season.replace('_', ' '))}"
+            )
+
+        if data.cme_gap is not None and not data.cme_gap.filled:
+            lines.append(
+                f"\U0001F4CA CME Gap: ${data.cme_gap.gap_low:,.0f}-${data.cme_gap.gap_high:,.0f} "
+                f"unfilled ({data.cme_gap.distance_pct:.1f}% away)"
+            )
+
+        if len(lines) == 1:
+            return ""
         return "\n".join(lines)
 
     def _format_market_regime(self, data: BriefingData) -> str:
@@ -826,6 +861,8 @@ class BriefingFormatter:
             "news": "News feed temporarily unavailable",
             "coingecko_budget": "CoinGecko usage temporarily unavailable",
             "signal_context": "Correlation or composite signal context temporarily unavailable",
+            "derivatives": "Derivatives context temporarily unavailable",
+            "macro_context": "Crypto macro context temporarily unavailable",
         }
         return [mapping[section] for section in failed_sections if section in mapping]
 

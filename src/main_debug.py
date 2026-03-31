@@ -245,6 +245,7 @@ def main() -> None:
         start_command,
         briefing_command,
         analyze_command,
+        funding_command,
         watchlist_command,
         add_command,
         remove_command,
@@ -262,6 +263,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", debug_wrap("start_command", start_command)))
     application.add_handler(CommandHandler("briefing", debug_wrap("briefing_command", briefing_command)))
     application.add_handler(CommandHandler("analyze", debug_wrap("analyze_command", analyze_command)))
+    application.add_handler(CommandHandler("funding", debug_wrap("funding_command", funding_command)))
     application.add_handler(CommandHandler("watchlist", debug_wrap("watchlist_command", watchlist_command)))
     application.add_handler(CommandHandler("add", debug_wrap("add_command", add_command)))
     application.add_handler(CommandHandler("remove", debug_wrap("remove_command", remove_command)))

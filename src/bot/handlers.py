@@ -125,6 +125,7 @@ def _help_text() -> str:
         "/events  Show latest detected events\n"
         "/corr  Show cross-asset correlation shifts\n"
         "/regime  Show the current market regime\n"
+        "/funding  Show derivatives and crypto macro context\n"
         "/signals NVDA  Show the full signal stack for one symbol\n"
         "/trade NVDA  Generate a structured trade setup for one symbol\n"
         "/trades  Scan the watchlist for active trade setups\n"
@@ -245,6 +246,68 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     await update.message.reply_text(tracker.format_status(), parse_mode="HTML")
+
+
+async def funding_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None:
+        return
+
+    msg = await update.message.reply_text("\U0001F4CA Loading derivatives context...")
+    try:
+        data = await _latest_briefing_data(context, include_agent_analysis=False)
+        _store_latest_briefing(context, data)
+    except Exception as exc:
+        logger.exception("Funding command failed while loading briefing data")
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F Could not load derivatives data.\n<i>{escaped_error[:250]}</i>")
+        return
+
+    symbols = sorted(set(data.funding) | set(data.oi))
+    if not symbols and data.fear_greed is None and data.dxy is None and data.cme_gap is None:
+        await msg.edit_text("No derivatives or macro data available yet.")
+        return
+
+    lines = ["\U0001F4CA <b>DERIVATIVES INTELLIGENCE</b>", ""]
+    for symbol in symbols:
+        funding = data.funding.get(symbol)
+        open_interest = data.oi.get(symbol)
+        if funding is not None:
+            emoji = (
+                "\U0001F7E2" if funding.signal == "bullish" else "\U0001F534" if funding.signal == "bearish" else "\u26AA"
+            )
+            lines.append(
+                f"{emoji} <b>{html.escape(symbol)}</b> Funding: {funding.current_rate * 100:+.4f}%"
+            )
+        if open_interest is not None:
+            lines.append(
+                f"   OI 24h: {open_interest.oi_change_24h_pct:+.1f}% | "
+                f"4h: {open_interest.oi_change_4h_pct:+.1f}%"
+            )
+
+    macro_lines: list[str] = []
+    if data.fear_greed is not None:
+        macro_lines.append(
+            f"\U0001F630 Fear &amp; Greed: {data.fear_greed.value} "
+            f"({html.escape(data.fear_greed.classification, quote=False)})"
+        )
+    if data.dxy is not None:
+        macro_lines.append(f"\U0001F4B5 DXY: {data.dxy.current:.2f} ({data.dxy.change_7d_pct:+.1f}% this week)")
+    if data.btc_dominance is not None:
+        macro_lines.append(
+            f"\U0001F451 BTC Dominance: {data.btc_dominance.dominance_pct:.1f}% "
+            f"({html.escape(data.btc_dominance.season.replace('_', ' '), quote=False)})"
+        )
+    if data.cme_gap is not None and not data.cme_gap.filled:
+        macro_lines.append(
+            f"\U0001F4CA CME Gap: ${data.cme_gap.gap_low:,.0f}-${data.cme_gap.gap_high:,.0f} "
+            f"({data.cme_gap.distance_pct:.1f}% away)"
+        )
+    if macro_lines:
+        lines.extend(["", "<b>MACRO</b>", *macro_lines])
+
+    await msg.edit_text("\n".join(lines), parse_mode="HTML")
 
 
 async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -629,6 +692,11 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 event_data=event_payload,
                 regime=regime_key,
                 btc_change_pct=_btc_change_pct(data),
+                funding=data.funding.get(symbol),
+                oi=data.oi.get(symbol),
+                cme_gap=data.cme_gap if symbol == "BTC" else None,
+                fear_greed=data.fear_greed,
+                dxy=data.dxy,
             )
         else:
             signal = generate_trade_signal(
@@ -733,6 +801,11 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 event_data=_event_payload(_event_for_symbol(data, symbol)),
                 regime=regime_key,
                 btc_change_pct=btc_change,
+                funding=data.funding.get(symbol),
+                oi=data.oi.get(symbol),
+                cme_gap=data.cme_gap if symbol == "BTC" else None,
+                fear_greed=data.fear_greed,
+                dxy=data.dxy,
             )
             if signal is None:
                 continue
@@ -1247,6 +1320,12 @@ def _store_latest_briefing(context: ContextTypes.DEFAULT_TYPE, data: BriefingDat
     context.bot_data["lead_lag_pairs"] = data.lead_lag_pairs
     context.bot_data["ta_signals"] = data.ta_signals
     context.bot_data["agent_analysis"] = data.agent_analysis
+    context.bot_data["funding"] = data.funding
+    context.bot_data["oi"] = data.oi
+    context.bot_data["fear_greed"] = data.fear_greed
+    context.bot_data["dxy"] = data.dxy
+    context.bot_data["cme_gap"] = data.cme_gap
+    context.bot_data["btc_dominance"] = data.btc_dominance
 
 
 def _portfolio_trade_notes(

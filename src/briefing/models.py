@@ -6,6 +6,8 @@ from datetime import datetime
 from src.agents.state import AgentAnalysis
 from src.correlation.models import LeadLagResult, PairCorrelation, RegimeState
 from src.data.base import AssetPrice, DeFiProtocol, EarningsEvent, NewsItem, SECFiling
+from src.data.derivatives import CMEGap, FundingData, OpenInterestData
+from src.data.macro import BTCDominanceData, DXYData, FearGreedData
 from src.events.models import DetectedEvent
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
@@ -45,4 +47,10 @@ class BriefingData:
     regime_state: RegimeState | None = None
     composite_scores: dict[str, CompositeScore] = field(default_factory=dict)
     agent_analysis: AgentAnalysis | None = None
+    funding: dict[str, FundingData] = field(default_factory=dict)
+    oi: dict[str, OpenInterestData] = field(default_factory=dict)
+    fear_greed: FearGreedData | None = None
+    dxy: DXYData | None = None
+    cme_gap: CMEGap | None = None
+    btc_dominance: BTCDominanceData | None = None
     failed_sections: list[str] = field(default_factory=list)

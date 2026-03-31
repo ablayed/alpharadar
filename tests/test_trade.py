@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 from src.agents.state import DebateVerdict
+from src.data.derivatives import CMEGap, FundingData, OpenInterestData
+from src.data.macro import DXYData, FearGreedData
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
 from src.trade.generator import (
@@ -107,6 +109,92 @@ def _verdict(
         bear_thesis="test",
         key_risk="test",
         action_context="test",
+    )
+
+
+def _funding(
+    *,
+    symbol: str = "BTC",
+    current_rate: float = 0.0012,
+    z_score: float = 2.8,
+    signal: str = "bearish",
+    description: str = "Funding stretched",
+) -> FundingData:
+    return FundingData(
+        symbol=symbol,
+        current_rate=current_rate,
+        rate_annualized=current_rate * 3 * 365 * 100,
+        z_score=z_score,
+        signal=signal,
+        description=description,
+    )
+
+
+def _oi(
+    *,
+    symbol: str = "BTC",
+    oi_change_4h_pct: float = 4.0,
+    oi_change_24h_pct: float = 8.0,
+    signal: str = "rising",
+    description: str = "OI rising",
+) -> OpenInterestData:
+    return OpenInterestData(
+        symbol=symbol,
+        current_oi=1_000_000.0,
+        oi_change_4h_pct=oi_change_4h_pct,
+        oi_change_24h_pct=oi_change_24h_pct,
+        signal=signal,
+        description=description,
+    )
+
+
+def _fear_greed(
+    *,
+    value: int = 18,
+    classification: str = "Fear",
+    signal: str = "bullish",
+    description: str = "Contrarian fear setup",
+) -> FearGreedData:
+    return FearGreedData(
+        value=value,
+        classification=classification,
+        signal=signal,
+        description=description,
+    )
+
+
+def _dxy(
+    *,
+    current: float = 102.4,
+    change_7d_pct: float = -1.4,
+    signal: str = "bullish",
+    description: str = "Dollar falling",
+) -> DXYData:
+    return DXYData(
+        current=current,
+        change_7d_pct=change_7d_pct,
+        btc_correlation_30d=-0.6,
+        signal=signal,
+        description=description,
+    )
+
+
+def _cme_gap(
+    *,
+    gap_low: float = 103.0,
+    gap_high: float = 105.0,
+    gap_direction: str = "up",
+    distance_pct: float = 4.0,
+    filled: bool = False,
+    description: str = "Gap above",
+) -> CMEGap:
+    return CMEGap(
+        gap_low=gap_low,
+        gap_high=gap_high,
+        gap_direction=gap_direction,
+        distance_pct=distance_pct,
+        filled=filled,
+        description=description,
     )
 
 
@@ -613,3 +701,89 @@ def test_generate_crypto_trade_signal_adds_obv_volume_and_stop_hunt_factors() ->
     assert "obv_divergence" in factor_names
     assert "volume" in factor_names
     assert "stop_hunt" in factor_names
+
+
+def test_generate_crypto_trade_signal_adds_funding_and_oi_bearish_factors() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=2_500.0,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=2_500.0,
+            atr_value=90.0,
+            atr_pct=3.6,
+            bb_upper=2_620.0,
+            bb_lower=2_420.0,
+            trend="strong_down",
+            overall_signal="sell",
+            confidence=0.74,
+            rsi_value=72.0,
+            rsi_signal="overbought",
+            macd_signal="bearish_cross",
+            macd_histogram=-0.3,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=-0.24,
+            agreement=0.8,
+            direction="sell",
+            breakdown={"sentiment": -0.08, "ta": -0.09, "event": -0.04},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bearish", confidence=0.82),
+        event_data={"event_type": "exploit", "remaining_drift_pct": -4.0},
+        regime="risk_off",
+        btc_change_pct=-3.0,
+        funding=_funding(symbol="ETH", current_rate=0.0013, z_score=3.1, signal="bearish"),
+        oi=_oi(symbol="ETH", oi_change_4h_pct=12.5, oi_change_24h_pct=9.2),
+    )
+
+    assert signal is not None
+    assert signal.direction == "SHORT"
+    factor_names = {factor.name for factor in signal.confluence_factors}
+    assert "funding_rate" in factor_names
+    assert "oi_divergence" in factor_names
+    assert "Funding rate z-score at +3.1" in signal.manipulation_check
+    assert "OI changed +12.5% in 4h" in signal.manipulation_check
+
+
+def test_generate_crypto_trade_signal_adds_macro_and_cme_factors() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="BTC",
+        current_price=100.0,
+        ta_signal=_ta_signal(
+            symbol="BTC",
+            current_price=100.0,
+            atr_value=2.0,
+            atr_pct=2.0,
+            bb_upper=112.0,
+            bb_lower=96.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.78,
+            rsi_signal="oversold",
+            rsi_value=29.0,
+            macd_signal="bullish_cross",
+            macd_histogram=0.3,
+        ),
+        composite=_composite(
+            symbol="BTC",
+            score=0.24,
+            agreement=0.82,
+            direction="buy",
+            breakdown={"sentiment": 0.09, "ta": 0.08, "event": 0.04},
+        ),
+        verdict=_verdict(symbol="BTC", prevailing_view="bullish", confidence=0.84),
+        event_data={"event_type": "etf_inflow", "remaining_drift_pct": 4.0},
+        regime="risk_on",
+        btc_change_pct=0.0,
+        cme_gap=_cme_gap(gap_low=103.0, gap_high=105.0, gap_direction="up"),
+        fear_greed=_fear_greed(),
+        dxy=_dxy(),
+    )
+
+    assert signal is not None
+    assert signal.direction == "LONG"
+    factor_names = {factor.name for factor in signal.confluence_factors}
+    assert "cme_gap" in factor_names
+    assert "fear_greed" in factor_names
+    assert "dxy" in factor_names

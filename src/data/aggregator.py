@@ -5,10 +5,14 @@ import logging
 import math
 import re
 import time
+from collections.abc import Awaitable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar, cast
 from zoneinfo import ZoneInfo
+
+import httpx
+import numpy as np
 
 from src.briefing.models import BriefingData
 from src.config import Settings
@@ -33,8 +37,24 @@ from src.data.base import (
 )
 from src.data.coingecko_client import CoinGeckoClient
 from src.data.defillama_client import DeFiLlamaClient
+from src.data.derivatives import (
+    CMEGap,
+    FundingData,
+    OpenInterestData,
+    detect_cme_gaps,
+    fetch_funding_rate,
+    fetch_open_interest,
+)
 from src.data.edgar_client import EdgarClient
 from src.data.finnhub_client import FinnhubClient
+from src.data.macro import (
+    BTCDominanceData,
+    DXYData,
+    FearGreedData,
+    fetch_btc_dominance,
+    fetch_dxy_data,
+    fetch_fear_greed,
+)
 from src.data.market_indices import MarketIndicesFetcher
 from src.events.classifier import EventClassifier
 from src.events.models import DetectedEvent
@@ -47,8 +67,6 @@ from src.signals import CompositeScore, SignalInput, compute_composite
 from src.storage.database import Database, WatchlistItem
 from src.ta.candles import fetch_crypto_candles, fetch_stock_candles
 from src.ta.signals import TASignal, compute_signals
-
-import numpy as np
 
 if TYPE_CHECKING:
     from src.agents.graph import AgentPipeline
@@ -861,6 +879,12 @@ class DataAggregator:
         correlation_top_movers: list[PairCorrelation] = []
         regime_state: RegimeState | None = None
         composite_scores: dict[str, CompositeScore] = {}
+        funding: dict[str, FundingData] = {}
+        oi: dict[str, OpenInterestData] = {}
+        fear_greed: FearGreedData | None = None
+        dxy: DXYData | None = None
+        cme_gap: CMEGap | None = None
+        btc_dominance: BTCDominanceData | None = None
         try:
             (
                 ta_signals,
@@ -882,6 +906,71 @@ class DataAggregator:
         except Exception:
             logger.exception("Failed to compute Phase 6 signal context")
             failed_sections.append("signal_context")
+
+        crypto_symbols = sorted({item.symbol.upper() for item in crypto_items})
+        btc_price = next(
+            (price.current_price for price in crypto_prices if price.symbol.upper() == "BTC"),
+            0.0,
+        )
+        async_jobs: list[tuple[str, str | None, Awaitable[object]]] = []
+        results: list[object | BaseException] = []
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                for symbol in crypto_symbols:
+                    async_jobs.append(("funding", symbol, fetch_funding_rate(client, symbol)))
+                    async_jobs.append(("oi", symbol, fetch_open_interest(client, symbol)))
+                async_jobs.extend(
+                    [
+                        ("fear_greed", None, fetch_fear_greed(client)),
+                        ("btc_dominance", None, fetch_btc_dominance(client)),
+                        ("dxy", None, fetch_dxy_data()),
+                        ("cme_gap", None, detect_cme_gaps(btc_price)),
+                    ]
+                )
+                results = cast(
+                    list[object | BaseException],
+                    await asyncio.gather(
+                        *(job[2] for job in async_jobs),
+                        return_exceptions=True,
+                    ),
+                )
+        except Exception:
+            logger.exception("Failed to fetch derivatives and macro context")
+            failed_sections.extend(["derivatives", "macro_context"])
+
+        derivative_failed = False
+        macro_failed = False
+        for (kind, symbol, _job), result in zip(async_jobs, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Context task %s failed for %s",
+                    kind,
+                    symbol or "global",
+                    exc_info=result,
+                )
+                if kind in {"funding", "oi"}:
+                    derivative_failed = True
+                else:
+                    macro_failed = True
+                continue
+
+            if kind == "funding" and symbol is not None and isinstance(result, FundingData):
+                funding[symbol] = result
+            elif kind == "oi" and symbol is not None and isinstance(result, OpenInterestData):
+                oi[symbol] = result
+            elif kind == "fear_greed" and isinstance(result, FearGreedData):
+                fear_greed = result
+            elif kind == "btc_dominance" and isinstance(result, BTCDominanceData):
+                btc_dominance = result
+            elif kind == "dxy" and isinstance(result, DXYData):
+                dxy = result
+            elif kind == "cme_gap" and isinstance(result, CMEGap):
+                cme_gap = result
+
+        if derivative_failed:
+            failed_sections.append("derivatives")
+        if macro_failed:
+            failed_sections.append("macro_context")
 
         briefing_data = BriefingData(
             generated_at=now,
@@ -907,6 +996,12 @@ class DataAggregator:
             regime_state=regime_state,
             composite_scores=composite_scores,
             agent_analysis=None,
+            funding=funding,
+            oi=oi,
+            fear_greed=fear_greed,
+            dxy=dxy,
+            cme_gap=cme_gap,
+            btc_dominance=btc_dominance,
             failed_sections=sorted(set(failed_sections)),
         )
 

@@ -26,6 +26,7 @@ from src.bot.handlers import (
     briefing_command,
     corr_command,
     events_command,
+    funding_command,
     handle_asset_type_callback,
     help_command,
     history_command,
@@ -208,6 +209,7 @@ def main() -> None:
     application.add_handler(CommandHandler("events", events_command))
     application.add_handler(CommandHandler("corr", corr_command))
     application.add_handler(CommandHandler("regime", regime_command))
+    application.add_handler(CommandHandler("funding", funding_command))
     application.add_handler(CommandHandler("signals", signals_command))
     application.add_handler(CommandHandler("trade", trade_command))
     application.add_handler(CommandHandler("trades", trades_command))

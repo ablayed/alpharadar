@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from src.agents.state import AgentAnalysis, DebateVerdict
+from src.data.derivatives import CMEGap
+from src.data.macro import BTCDominanceData, DXYData, FearGreedData
 from src.briefing.formatter import (
     MAX_TELEGRAM_LENGTH,
     BriefingFormatter,
@@ -167,6 +169,33 @@ def _sample_data(is_weekend: bool) -> BriefingData:
             {"symbol": "RNDR"},
         ],
         coingecko_usage=(342, 10_000),
+        fear_greed=FearGreedData(
+            value=18,
+            classification="Fear",
+            signal="bullish",
+            description="Fear remains elevated",
+        ),
+        dxy=DXYData(
+            current=102.4,
+            change_7d_pct=-1.4,
+            btc_correlation_30d=-0.62,
+            signal="bullish",
+            description="Dollar weakening",
+        ),
+        cme_gap=CMEGap(
+            gap_low=66_000.0,
+            gap_high=67_200.0,
+            gap_direction="up",
+            distance_pct=2.7,
+            filled=False,
+            description="Gap below",
+        ),
+        btc_dominance=BTCDominanceData(
+            dominance_pct=54.8,
+            change_7d=0.0,
+            season="neutral",
+            description="Rotation mixed",
+        ),
         failed_sections=[],
     )
 
@@ -201,8 +230,13 @@ def test_format_daily_contains_context_annotations_and_no_filler() -> None:
     assert "<b>STOCKS</b>" in text
     assert "<b>CRYPTO</b>" in text
     assert "<b>CATALYSTS</b>" in text
+    assert "<b>MACRO CONTEXT</b>" in text
     assert "SPY: $584.23 +0.3% (S&amp;P 500 proxy)" in text
     assert "QQQ: $421.15 🟢 +1.5% (NASDAQ proxy)" in text
+    assert "Fear &amp; Greed: 18 (Fear)" in text
+    assert "Dollar (DXY): 102.40 (-1.4% this week)" in text
+    assert "BTC Dominance: 54.8% neutral" in text
+    assert "CME Gap: $66,000-$67,200 unfilled (2.7% away)" in text
     assert "<i>VIX at 31 signals high fear  DeFi capital inflows accelerating</i>" in text
     assert "🟢 <b>NVDA</b> $142.30 jumping +3.2%" in text
     assert "(+0.82) NVIDIA datacenter revenue beat &amp; guidance raise" in text

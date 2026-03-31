@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 from src.agents.state import DebateVerdict
+from src.data.derivatives import CMEGap, FundingData, OpenInterestData
+from src.data.macro import DXYData, FearGreedData
 from src.signals.models import CompositeScore
 from src.ta.indicators import obv_divergence, volume_confirmation
 from src.ta.signals import TASignal
@@ -259,6 +261,11 @@ def generate_crypto_trade_signal(
     event_data: Mapping[str, object] | None,
     regime: str,
     btc_change_pct: float = 0.0,
+    funding: FundingData | None = None,
+    oi: OpenInterestData | None = None,
+    cme_gap: CMEGap | None = None,
+    fear_greed: FearGreedData | None = None,
+    dxy: DXYData | None = None,
 ) -> TradeSignal | None:
     factors: list[ConfluenceFactor] = []
 
@@ -536,6 +543,109 @@ def generate_crypto_trade_signal(
                 )
             )
 
+    if funding is not None and funding.signal != "neutral":
+        factors.append(
+            ConfluenceFactor(
+                name="funding_rate",
+                direction=funding.signal,
+                strength=min(0.85, 0.5 + (abs(funding.z_score) * 0.1)),
+                description=funding.description,
+            )
+        )
+
+    if oi is not None and ta_signal is not None:
+        if ta_signal.trend in {"strong_up", "up"}:
+            price_dir = "up"
+        elif ta_signal.trend in {"strong_down", "down"}:
+            price_dir = "down"
+        else:
+            price_dir = "flat"
+        oi_dir = "rising" if oi.oi_change_24h_pct > 3 else "falling" if oi.oi_change_24h_pct < -3 else "flat"
+
+        if oi_dir == "rising" and price_dir == "down":
+            factors.append(
+                ConfluenceFactor(
+                    name="oi_divergence",
+                    direction="bearish",
+                    strength=0.7,
+                    description=(
+                        f"OI rising ({oi.oi_change_24h_pct:+.1f}%) while price trends down - "
+                        "fragile longs can become liquidation fuel"
+                    ),
+                )
+            )
+        elif oi_dir == "falling" and price_dir == "down":
+            factors.append(
+                ConfluenceFactor(
+                    name="oi_divergence",
+                    direction="bullish",
+                    strength=0.7,
+                    description=(
+                        f"OI falling ({oi.oi_change_24h_pct:+.1f}%) while price trends down - "
+                        "capitulation may be forming"
+                    ),
+                )
+            )
+        elif oi_dir == "rising" and price_dir == "up":
+            factors.append(
+                ConfluenceFactor(
+                    name="oi_confirmation",
+                    direction="bullish",
+                    strength=0.5,
+                    description=(
+                        f"OI rising ({oi.oi_change_24h_pct:+.1f}%) with price - "
+                        "fresh money is confirming the move"
+                    ),
+                )
+            )
+
+    if symbol.upper() == "BTC" and cme_gap is not None and not cme_gap.filled:
+        gap_mid = (cme_gap.gap_low + cme_gap.gap_high) / 2
+        if current_price > gap_mid:
+            factors.append(
+                ConfluenceFactor(
+                    name="cme_gap",
+                    direction="bearish",
+                    strength=0.5,
+                    description=(
+                        f"Unfilled CME gap below at ${cme_gap.gap_low:,.0f}-${cme_gap.gap_high:,.0f} "
+                        "can pull price lower"
+                    ),
+                )
+            )
+        elif current_price < gap_mid:
+            factors.append(
+                ConfluenceFactor(
+                    name="cme_gap",
+                    direction="bullish",
+                    strength=0.5,
+                    description=(
+                        f"Unfilled CME gap above at ${cme_gap.gap_low:,.0f}-${cme_gap.gap_high:,.0f} "
+                        "can act as a bullish magnet"
+                    ),
+                )
+            )
+
+    if fear_greed is not None and fear_greed.signal != "neutral":
+        factors.append(
+            ConfluenceFactor(
+                name="fear_greed",
+                direction=fear_greed.signal,
+                strength=0.6 if fear_greed.value <= 10 or fear_greed.value >= 90 else 0.4,
+                description=fear_greed.description,
+            )
+        )
+
+    if dxy is not None and dxy.signal != "neutral":
+        factors.append(
+            ConfluenceFactor(
+                name="dxy",
+                direction=dxy.signal,
+                strength=0.4,
+                description=dxy.description,
+            )
+        )
+
     bullish_factors = [factor for factor in factors if factor.direction == "bullish"]
     bearish_factors = [factor for factor in factors if factor.direction == "bearish"]
     bullish_score = sum(factor.strength for factor in bullish_factors)
@@ -681,7 +791,14 @@ def generate_crypto_trade_signal(
     tp1_pct = abs(tp1 - current_price) / current_price * 100
     tp2_pct = abs(tp2 - current_price) / current_price * 100
     tp3_pct = abs(tp3 - current_price) / current_price * 100
-    manipulation = _check_manipulation_v2(ta_signal, composite, regime, factors)
+    manipulation = _check_manipulation_v2(
+        ta_signal,
+        composite,
+        regime,
+        factors,
+        oi=oi,
+        funding=funding,
+    )
 
     top_reasons = sorted(active_factors, key=lambda factor: factor.strength, reverse=True)[:3]
     reasoning = ". ".join(factor.description for factor in top_reasons) + "."
@@ -1063,6 +1180,9 @@ def _check_manipulation_v2(
     composite: CompositeScore | None,
     regime: str,
     factors: list[ConfluenceFactor],
+    *,
+    oi: OpenInterestData | None = None,
+    funding: FundingData | None = None,
 ) -> str:
     flags: list[str] = []
     if composite is not None:
@@ -1086,6 +1206,14 @@ def _check_manipulation_v2(
     strong_bear = sum(1 for factor in factors if factor.direction == "bearish" and factor.strength > 0.7)
     if strong_bull > 0 and strong_bear > 0:
         flags.append("Strong signals conflicting - enter with smaller size, scale in on confirmation")
+
+    if oi is not None and abs(oi.oi_change_4h_pct) > 10:
+        flags.append(f"OI changed {oi.oi_change_4h_pct:+.1f}% in 4h - elevated liquidation cascade risk")
+
+    if funding is not None and abs(funding.z_score) > 2.5:
+        flags.append(
+            f"Funding rate z-score at {funding.z_score:+.1f} - positioning is extreme and reversal risk is elevated"
+        )
 
     if regime == "volatile":
         flags.append("Volatile regime - use 50% normal position size")
