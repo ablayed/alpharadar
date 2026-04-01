@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import html
 import logging
-import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,7 +15,9 @@ from src.config import settings
 from src.data.aggregator import DataAggregator
 from src.briefing.models import BriefingData
 from src.events.models import DetectedEvent
+from src.ml import MLEnsemble, train_all_models
 from src.storage.database import Database
+from src.ta.signals import TASignal
 from src.trade import PortfolioTracker, TradeSignal, generate_crypto_trade_signal
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,13 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
         time=datetime.time(hour=22, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
         days=tuple(range(7)),
         name="record_prediction_outcomes",
+    )
+    job_queue.run_daily(
+        callback=weekly_ml_training,
+        time=datetime.time(hour=6, minute=0, second=0, tzinfo=ZoneInfo(settings.timezone)),
+        # python-telegram-bot maps 0-6 to Sunday-Saturday.
+        days=(6,),
+        name="weekly_ml_training",
     )
     job_queue.run_daily(
         callback=run_weekly_reflection_job,
@@ -203,13 +211,15 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         btc_change = _btc_change_pct(data)
         signals: list[TradeSignal] = []
+        ensemble = context.bot_data.get("ml_ensemble")
 
         for price_item in data.crypto_prices:
             symbol = price_item.symbol.upper()
+            ta_signal = data.ta_signals.get(symbol)
             signal = generate_crypto_trade_signal(
                 symbol=symbol,
                 current_price=price_item.current_price,
-                ta_signal=data.ta_signals.get(symbol),
+                ta_signal=ta_signal,
                 composite=data.composite_scores.get(symbol),
                 verdict=_verdict_for_symbol(data, symbol),
                 event_data=_event_payload_for_symbol(data, symbol),
@@ -220,6 +230,7 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                 cme_gap=data.cme_gap if symbol == "BTC" else None,
                 fear_greed=data.fear_greed,
                 dxy=data.dxy,
+                ml_prediction=_ml_prediction_for_signal(ensemble, symbol, ta_signal),
             )
             if signal is not None:
                 signals.append(signal)
@@ -580,6 +591,31 @@ async def run_weekly_reflection_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("Weekly reflection job failed")
 
 
+async def weekly_ml_training(context: ContextTypes.DEFAULT_TYPE) -> None:
+    ensemble = context.bot_data.get("ml_ensemble")
+    db = context.bot_data.get("db")
+    if not isinstance(ensemble, MLEnsemble) or not isinstance(db, Database):
+        logger.info("Skipping weekly ML training because dependencies are missing")
+        return
+
+    try:
+        crypto_symbols = [item.symbol.upper() for item in await db.get_watchlist("crypto")]
+        if not crypto_symbols:
+            logger.info("Skipping weekly ML training because the crypto watchlist is empty")
+            return
+
+        logger.info("Starting weekly ML training for %d crypto symbols", len(crypto_symbols))
+        results = await train_all_models(ensemble, crypto_symbols, db_path=db.db_path)
+        success_count = sum(1 for success in results.values() if success)
+        logger.info(
+            "Weekly ML training complete: %d/%d symbols succeeded",
+            success_count,
+            len(results),
+        )
+    except Exception:
+        logger.exception("Weekly ML training failed")
+
+
 async def update_correlation_engine_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     aggregator = context.bot_data.get("aggregator")
     pipeline = context.bot_data.get("alert_pipeline")
@@ -649,3 +685,27 @@ def _scheduler_chat_id() -> int | str:
         return int(settings.telegram_chat_id)
     except ValueError:
         return settings.telegram_chat_id
+
+
+def _ml_prediction_for_signal(
+    ensemble_obj: object,
+    symbol: str,
+    ta_signal: TASignal | None,
+) -> object | None:
+    if not isinstance(ensemble_obj, MLEnsemble) or ta_signal is None:
+        return None
+    if (
+        ta_signal._close is None
+        or ta_signal._high is None
+        or ta_signal._low is None
+        or ta_signal._volume is None
+    ):
+        return None
+    return ensemble_obj.predict_from_ohlcv(
+        symbol,
+        ta_signal._close,
+        ta_signal._high,
+        ta_signal._low,
+        ta_signal._volume,
+        ta_signal._open,
+    )

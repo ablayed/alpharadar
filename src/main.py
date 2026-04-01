@@ -52,6 +52,7 @@ from src.bot.scheduler import _schedule_trade_scans, setup_scheduler
 from src.briefing.formatter import BriefingFormatter
 from src.config import settings
 from src.data.aggregator import DataAggregator
+from src.ml import MLEnsemble, train_all_models
 from src.storage.database import Database
 from src.trade import PortfolioTracker
 
@@ -97,11 +98,13 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     application.bot_data["started_at"] = datetime.now(ZoneInfo(settings.timezone))
     application.bot_data["alert_pipeline"] = AlertPipeline()
     application.bot_data["portfolio_tracker"] = PortfolioTracker()
+    application.bot_data["ml_ensemble"] = MLEnsemble()
 
     await _seed_alert_reference_prices(application)
     await _start_alert_streams(application)
     await setup_scheduler(application)
     await _schedule_trade_scans(application)
+    application.create_task(_run_initial_ml_training(application), name="initial_ml_training")
     logger.info("AlphaRadar initialized successfully")
 
 
@@ -184,6 +187,32 @@ async def _start_alert_streams(application: Application[Any, Any, Any, Any, Any,
             binance_ws_loop(crypto_symbols, on_crypto_price),
             name="binance_ws",
         )
+
+
+async def _run_initial_ml_training(
+    application: Application[Any, Any, Any, Any, Any, Any],
+) -> None:
+    ensemble = application.bot_data.get("ml_ensemble")
+    db = application.bot_data.get("db")
+    if not isinstance(ensemble, MLEnsemble) or not isinstance(db, Database):
+        return
+
+    try:
+        crypto_symbols = [item.symbol.upper() for item in await db.get_watchlist("crypto")]
+        if not crypto_symbols:
+            logger.info("Skipping initial ML training because the crypto watchlist is empty")
+            return
+
+        logger.info("Starting initial ML training for %d crypto symbols", len(crypto_symbols))
+        results = await train_all_models(ensemble, crypto_symbols, db_path=db.db_path)
+        success_count = sum(1 for success in results.values() if success)
+        logger.info(
+            "Initial ML training complete: %d/%d symbols succeeded",
+            success_count,
+            len(results),
+        )
+    except Exception:
+        logger.exception("Initial ML training failed")
 
 
 def _telegram_chat_id() -> int | str:

@@ -5,6 +5,7 @@ import numpy as np
 from src.agents.state import DebateVerdict
 from src.data.derivatives import CMEGap, FundingData, OpenInterestData
 from src.data.macro import DXYData, FearGreedData
+from src.ml import EnsemblePrediction
 from src.signals.models import CompositeScore
 from src.ta.signals import TASignal
 from src.trade.generator import (
@@ -195,6 +196,27 @@ def _cme_gap(
         distance_pct=distance_pct,
         filled=filled,
         description=description,
+    )
+
+
+def _ml_prediction(
+    *,
+    symbol: str = "BTC",
+    direction: str = "bullish",
+    confidence: float = 0.72,
+    agreement: int = 2,
+    description: str = "ML ensemble: 2/3 models predict upside (avg prob: 72%)",
+) -> EnsemblePrediction:
+    return EnsemblePrediction(
+        symbol=symbol,
+        direction=direction,
+        confidence=confidence,
+        xgb_prob=0.71,
+        rf_prob=0.69,
+        lr_prob=0.54,
+        agreement=agreement,
+        description=description,
+        last_trained=1_700_000_000.0,
     )
 
 
@@ -922,3 +944,43 @@ def test_generate_crypto_trade_signal_adds_macro_and_cme_factors() -> None:
     assert "cme_gap" in factor_names
     assert "fear_greed" in factor_names
     assert "dxy" in factor_names
+
+
+def test_generate_crypto_trade_signal_adds_ml_ensemble_factor() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="ETH",
+        current_price=2_500.0,
+        ta_signal=_ta_signal(
+            symbol="ETH",
+            current_price=2_500.0,
+            atr_value=90.0,
+            atr_pct=3.6,
+            bb_upper=2_620.0,
+            bb_lower=2_420.0,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.74,
+            rsi_value=28.0,
+            rsi_signal="oversold",
+            macd_signal="bullish_cross",
+            macd_histogram=0.3,
+        ),
+        composite=_composite(
+            symbol="ETH",
+            score=0.24,
+            agreement=0.8,
+            direction="buy",
+            breakdown={"sentiment": 0.08, "ta": 0.07, "event": 0.04},
+        ),
+        verdict=_verdict(symbol="ETH", prevailing_view="bullish", confidence=0.82),
+        event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 3.5},
+        regime="risk_on",
+        btc_change_pct=2.2,
+        ml_prediction=_ml_prediction(symbol="ETH"),
+    )
+
+    assert signal is not None
+    ml_factor = next(factor for factor in signal.confluence_factors if factor.name == "ml_ensemble")
+    assert ml_factor.direction == "bullish"
+    assert ml_factor.strength == 0.72
+    assert "2/3 models predict upside" in ml_factor.description

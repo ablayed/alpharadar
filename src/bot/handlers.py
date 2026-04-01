@@ -22,6 +22,7 @@ from src.data.base import AssetPrice
 from src.data.aggregator import DataAggregator
 from src.events.calibration import format_remaining_drift_status
 from src.events.models import DetectedEvent
+from src.ml import MLEnsemble
 from src.reflection.evaluator import AccuracyStats, ReflectionEvaluator
 from src.sentiment.analyzer import SentimentAnalyzer
 from src.signals.models import CompositeScore
@@ -875,6 +876,11 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         event_payload = _event_payload(_event_for_symbol(data, symbol))
         if price_item.asset_type.value == "crypto":
+            ml_prediction = _ml_prediction_for_signal(
+                context.application.bot_data.get("ml_ensemble"),
+                symbol,
+                ta_signal,
+            )
             signal = generate_crypto_trade_signal(
                 symbol=symbol,
                 current_price=price_item.current_price,
@@ -889,6 +895,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 cme_gap=data.cme_gap if symbol == "BTC" else None,
                 fear_greed=data.fear_greed,
                 dxy=data.dxy,
+                ml_prediction=ml_prediction,
             )
         else:
             signal = generate_trade_signal(
@@ -976,10 +983,16 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         btc_change = _btc_change_pct(data)
         for price_item in data.crypto_prices:
             symbol = price_item.symbol.upper()
+            ta_signal = data.ta_signals.get(symbol)
+            ml_prediction = _ml_prediction_for_signal(
+                context.application.bot_data.get("ml_ensemble"),
+                symbol,
+                ta_signal,
+            )
             signal = generate_crypto_trade_signal(
                 symbol=symbol,
                 current_price=price_item.current_price,
-                ta_signal=data.ta_signals.get(symbol),
+                ta_signal=ta_signal,
                 composite=data.composite_scores.get(symbol),
                 verdict=_verdict_for_symbol(data.agent_analysis, symbol),
                 event_data=_event_payload(_event_for_symbol(data, symbol)),
@@ -990,6 +1003,7 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 cme_gap=data.cme_gap if symbol == "BTC" else None,
                 fear_greed=data.fear_greed,
                 dxy=data.dxy,
+                ml_prediction=ml_prediction,
             )
             if signal is None:
                 continue
@@ -2453,6 +2467,30 @@ def _price_item_for_symbol(data: BriefingData, symbol: str) -> AssetPrice | None
         if item.symbol.upper() == symbol_upper:
             return item
     return None
+
+
+def _ml_prediction_for_signal(
+    ensemble_obj: object,
+    symbol: str,
+    ta_signal: TASignal | None,
+) -> object | None:
+    if not isinstance(ensemble_obj, MLEnsemble) or ta_signal is None:
+        return None
+    if (
+        ta_signal._close is None
+        or ta_signal._high is None
+        or ta_signal._low is None
+        or ta_signal._volume is None
+    ):
+        return None
+    return ensemble_obj.predict_from_ohlcv(
+        symbol,
+        ta_signal._close,
+        ta_signal._high,
+        ta_signal._low,
+        ta_signal._volume,
+        ta_signal._open,
+    )
 
 
 def _event_for_symbol(data: BriefingData, symbol: str) -> DetectedEvent | None:

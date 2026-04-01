@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from src.agents.state import DebateVerdict
 from src.data.derivatives import CMEGap, FundingData, OpenInterestData
@@ -19,6 +19,9 @@ from src.ta.swings import (
     detect_stop_hunt,
     get_last_swing,
 )
+
+if TYPE_CHECKING:
+    from src.ml.ensemble import EnsemblePrediction
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +276,7 @@ def generate_crypto_trade_signal(
     cme_gap: CMEGap | None = None,
     fear_greed: FearGreedData | None = None,
     dxy: DXYData | None = None,
+    ml_prediction: EnsemblePrediction | None = None,
 ) -> TradeSignal | None:
     factors: list[ConfluenceFactor] = []
 
@@ -722,6 +726,16 @@ def generate_crypto_trade_signal(
                 direction=dxy.signal,
                 strength=0.4,
                 description=dxy.description,
+            )
+        )
+
+    if ml_prediction is not None and ml_prediction.direction != "neutral":
+        factors.append(
+            ConfluenceFactor(
+                name="ml_ensemble",
+                direction=ml_prediction.direction,
+                strength=min(0.8, max(0.0, ml_prediction.confidence)),
+                description=ml_prediction.description,
             )
         )
 
