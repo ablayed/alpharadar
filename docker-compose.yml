@@ -9,9 +9,9 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./models:/app/models:ro
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-

@@ -1,0 +1,16 @@
+.env
+.git
+.gitignore
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tmp/
+.venv/
+__pycache__/
+data/
+dist/
+logs/
+models/
+ssh-key
+ssh-key.pub
+tests/

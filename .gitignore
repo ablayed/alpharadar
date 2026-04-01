@@ -14,3 +14,5 @@ pytest-cache-files-*/
 /models/
 dist/
 *.egg-info/
+ssh-key
+ssh-key.pub

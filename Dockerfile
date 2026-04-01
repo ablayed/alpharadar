@@ -9,10 +9,8 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 RUN pip install --no-cache-dir .
 
-COPY models/ models/
 COPY scripts/ scripts/
 
-RUN test -f /app/models/finbert-onnx/model.onnx
-RUN mkdir -p data logs
+RUN mkdir -p data logs models
 
 CMD ["python", "-m", "src.main"]
