@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     finnhub_api_key: SecretStr
     coingecko_api_key: SecretStr
+    groq_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
 
     briefing_hour: int = 7
@@ -29,6 +30,11 @@ class Settings(BaseSettings):
 
     coingecko_monthly_limit: int = 10_000
     coingecko_warning_threshold: float = 0.8
+
+    @property
+    def llm_api_key(self) -> SecretStr | None:
+        """Prefer the current Groq key name, but keep GEMINI_API_KEY as a fallback."""
+        return self.groq_api_key or self.gemini_api_key
 
 
 settings = Settings()  # type: ignore[call-arg]

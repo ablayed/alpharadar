@@ -735,8 +735,8 @@ class DataAggregator:
         return await get_latest_lessons(self.settings.db_path)
 
     def agent_pipeline_status_text(self) -> str:
-        if self.settings.gemini_api_key is None:
-            return "No GEMINI_API_KEY set"
+        if self.settings.llm_api_key is None:
+            return "No GROQ_API_KEY or GEMINI_API_KEY set"
         if self._agent_pipeline is not None:
             return "Ready (Groq Llama 3.3 70B)"
         if self._agent_pipeline_init_error is not None:
@@ -1493,7 +1493,7 @@ class DataAggregator:
         return "Neutral"
 
     async def _ensure_agent_pipeline(self) -> AgentPipeline | None:
-        if self.settings.gemini_api_key is None:
+        if self.settings.llm_api_key is None:
             return None
         if self._agent_pipeline is not None:
             return self._agent_pipeline
@@ -1518,14 +1518,14 @@ class DataAggregator:
         return self._agent_pipeline
 
     async def _ensure_llm_client(self) -> GeminiClient | None:
-        if self.settings.gemini_api_key is None:
+        if self.settings.llm_api_key is None:
             return None
         if self._gemini_client is not None:
             return self._gemini_client
 
         from src.agents.llm import GeminiClient
 
-        api_key = self.settings.gemini_api_key.get_secret_value()
+        api_key = self.settings.llm_api_key.get_secret_value()
         gemini = GeminiClient(api_key=api_key)
         await gemini.initialize()
         self._gemini_client = gemini

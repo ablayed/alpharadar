@@ -16,6 +16,25 @@ from aiolimiter import AsyncLimiter
 logger = logging.getLogger(__name__)
 
 
+def _response_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text[:200] or "no response body"
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+    return response.text[:200] or "no response body"
+
+
 class GeminiClient:
     """
     Async Groq client with light rate limiting for the daily agent pipeline.
@@ -79,24 +98,34 @@ class GeminiClient:
         if not self._initialized:
             raise RuntimeError("GeminiClient is not initialized")
 
-        response = httpx.post(
-            self.API_URL,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            timeout=60.0,
-        )
-        response.raise_for_status()
+        try:
+            response = httpx.post(
+                self.API_URL,
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=60.0,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            detail = _response_error_detail(exc.response)
+            if status_code == 401:
+                raise RuntimeError("Groq rejected the API key. Check GROQ_API_KEY.") from exc
+            if status_code == 429:
+                raise RuntimeError("Groq rate limit or quota hit. Retry in a minute.") from exc
+            raise RuntimeError(f"Groq request failed ({status_code}): {detail}") from exc
+
         data = response.json()
         message = data["choices"][0]["message"]["content"]
         return message if isinstance(message, str) else str(message)

@@ -10,7 +10,7 @@ Copy `.env.example` to `.env` and set at least:
 - `TELEGRAM_CHAT_ID`
 - `FINNHUB_API_KEY`
 - `COINGECKO_API_KEY`
-- `GEMINI_API_KEY` if you want the agent pipeline enabled
+- `GROQ_API_KEY` if you want the agent pipeline enabled
 - `TIMEZONE` if you do not want the default `Europe/London`
 
 ## Local Run
@@ -110,7 +110,8 @@ Important migration note:
 
 - Copy `data/alpharadar.db` from the Azure VM if you want to preserve watchlist state, briefing history, trade logs, and cached usage data.
 - Copy `models/finbert-onnx/` from the Azure VM if you want FinBERT sentiment available immediately on the droplet.
-- `GROQ_API_KEY` is not used by the current codebase. The optional LLM key is `GEMINI_API_KEY`.
+- The current LLM integration uses Groq. Set `GROQ_API_KEY` in `.env`.
+- `GEMINI_API_KEY` is still accepted as a backward-compatible fallback, but `GROQ_API_KEY` should be preferred.
 
 Example state sync from your old VM:
 

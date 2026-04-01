@@ -592,7 +592,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         if analysis is None:
             await msg.edit_text(
-                "\u26A0\uFE0F Agent pipeline unavailable. Check GEMINI_API_KEY or Groq status."
+                "\u26A0\uFE0F Agent pipeline unavailable. Check GROQ_API_KEY or Groq status."
             )
             return
 
@@ -628,7 +628,10 @@ async def playbook_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     aggregator = _aggregator_from_context(context)
 
     try:
-        data = await _latest_briefing_data(context, include_agent_analysis=True)
+        # The playbook can still be generated without agent verdicts, which keeps
+        # the command reliable when the Groq-backed debate pipeline is unavailable
+        # or rate-limited.
+        data = await _latest_briefing_data(context, include_agent_analysis=False)
         _store_latest_briefing(context, data)
         playbook_text, llm_calls, duration = await aggregator.generate_playbook(data)
         message = _format_playbook_message(
