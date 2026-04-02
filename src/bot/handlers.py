@@ -1253,27 +1253,66 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"❌ {symbol} not found in your watchlist")
 
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _legacy_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await owner_only(update, context):
         return
-    if update.message is None:
+    if update.message is None or update.effective_chat is None:
         return
 
+    bot_data = context.application.bot_data
     aggregator = _aggregator_from_context(context)
     db = _db_from_context(context)
-    health = await aggregator.provider_health()
-    cg_used, cg_limit = await aggregator.coingecko.get_remaining_budget()
-    stocks = await db.get_watchlist("stock")
-    crypto = await db.get_watchlist("crypto")
-    sentiment_cache_count = await db.get_sentiment_cache_count()
-    model_status = (
-        "Loaded (ONNX, CPU)"
-        if aggregator.sentiment_analyzer.is_available()
-        else "Not available"
+
+    try:
+        health: dict[str, bool | None] = await aggregator.provider_health()
+    except Exception:
+        logger.exception("Status command failed while checking provider health")
+        health = {
+            "finnhub": None,
+            "coingecko": None,
+            "defillama": None,
+            "edgar": None,
+        }
+
+    try:
+        cg_used, cg_limit = await aggregator.coingecko.get_remaining_budget()
+    except Exception:
+        logger.exception("Status command failed while loading CoinGecko budget")
+        cg_used = 0
+        cg_limit = settings.coingecko_monthly_limit
+
+    crypto_items = await db.get_watchlist("crypto")
+    crypto_symbols = sorted({item.symbol.upper() for item in crypto_items})
+    ml_section, last_trained_text = _format_ml_status_lines(
+        bot_data.get("ml_ensemble"),
+        crypto_symbols,
     )
+
+    funding = bot_data.get("funding")
+    if not isinstance(funding, dict):
+        funding = {}
+    oi = bot_data.get("oi")
+    if not isinstance(oi, dict):
+        oi = {}
+
+    n_funding = sum(1 for item in funding.values() if item is not None)
+    n_oi = sum(1 for item in oi.values() if item is not None)
+
+    fear_greed = bot_data.get("fear_greed")
+    dxy = bot_data.get("dxy")
+    btc_dominance = bot_data.get("btc_dominance")
+    regime_text = _regime_status_text(bot_data.get("current_regime"))
+    cme_status = _format_cme_gap_status(bot_data.get("cme_gap"))
+
+    active_trades, closed_trades, predictions_logged = await _load_status_trade_counts(
+        db.db_path,
+    )
+    portfolio = bot_data.get("portfolio_tracker")
+    total_risk = portfolio.get_total_risk() if isinstance(portfolio, PortfolioTracker) else 0.0
+
     agent_status = aggregator.agent_pipeline_status_text()
+    correlation_pair_count = _correlation_pair_count(bot_data)
     ws_state = _websocket_status_text(context)
-    next_briefing = _next_briefing_text()
     uptime = _uptime_text(context)
 
     text = (
@@ -1292,6 +1331,132 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"🕐 Uptime: {uptime}"
     )
     await update.message.reply_text(text)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await owner_only(update, context):
+        return
+    if update.message is None or update.effective_chat is None:
+        return
+
+    bot_data = context.application.bot_data
+    aggregator = _aggregator_from_context(context)
+    db = _db_from_context(context)
+
+    try:
+        health: dict[str, bool | None] = await aggregator.provider_health()
+    except Exception:
+        logger.exception("Status command failed while checking provider health")
+        health = {
+            "finnhub": None,
+            "coingecko": None,
+            "defillama": None,
+            "edgar": None,
+        }
+
+    try:
+        cg_used, cg_limit = await aggregator.coingecko.get_remaining_budget()
+    except Exception:
+        logger.exception("Status command failed while loading CoinGecko budget")
+        cg_used = 0
+        cg_limit = settings.coingecko_monthly_limit
+
+    crypto_items = await db.get_watchlist("crypto")
+    crypto_symbols = sorted({item.symbol.upper() for item in crypto_items})
+    ml_section, last_trained_text = _format_ml_status_lines(
+        bot_data.get("ml_ensemble"),
+        crypto_symbols,
+    )
+
+    funding = bot_data.get("funding")
+    if not isinstance(funding, dict):
+        funding = {}
+    oi = bot_data.get("oi")
+    if not isinstance(oi, dict):
+        oi = {}
+
+    n_funding = sum(1 for item in funding.values() if item is not None)
+    n_oi = sum(1 for item in oi.values() if item is not None)
+
+    fear_greed = bot_data.get("fear_greed")
+    dxy = bot_data.get("dxy")
+    btc_dominance = bot_data.get("btc_dominance")
+    regime_text = _regime_status_text(bot_data.get("current_regime"))
+    cme_status = _format_cme_gap_status(bot_data.get("cme_gap"))
+
+    active_trades, closed_trades, predictions_logged = await _load_status_trade_counts(
+        db.db_path,
+    )
+    portfolio = bot_data.get("portfolio_tracker")
+    total_risk = portfolio.get_total_risk() if isinstance(portfolio, PortfolioTracker) else 0.0
+
+    agent_status = aggregator.agent_pipeline_status_text()
+    correlation_pair_count = _correlation_pair_count(bot_data)
+    ws_state = _websocket_status_text(context)
+    uptime = _uptime_text(context)
+
+    lines = [
+        "<b>ALPHARADAR STATUS</b>",
+        "",
+        "\U0001F5A5 Server: DigitalOcean London",
+        f"\U0001F4CA RAM: {_memory_usage_text()} | Uptime: {uptime}",
+        "",
+        "<b>DATA PIPELINE</b>",
+        _format_subsystem_line("Finnhub (news + quotes)", health.get("finnhub")),
+        _format_subsystem_line("CoinGecko (crypto prices)", health.get("coingecko")),
+        _format_subsystem_line("DeFi Llama (TVL)", health.get("defillama")),
+        _format_subsystem_line("SEC EDGAR (filings)", health.get("edgar")),
+        _format_subsystem_line("Binance Futures (funding + OI)", True if (n_funding or n_oi) else None),
+        _format_subsystem_line("Alternative.me (Fear & Greed)", fear_greed is not None),
+        _format_subsystem_line(
+            "yfinance (DXY + CME + candles)",
+            (dxy is not None) or bot_data.get("cme_gap") is not None,
+        ),
+        "",
+        "<b>ANALYSIS ENGINE</b>",
+        _format_subsystem_line("FinBERT sentiment (ONNX)", aggregator.sentiment_analyzer.is_available()),
+        _format_agent_pipeline_line(agent_status),
+        _format_subsystem_line("Technical analysis (14 indicators)", True),
+        _format_subsystem_line("SMC detection (FVG + BOS + Order Blocks)", True),
+        _format_subsystem_line(
+            f"Correlation engine ({correlation_pair_count} pairs tracked)",
+            True if correlation_pair_count > 0 else None,
+        ),
+        f"\U0001F4C8 Regime detection: {html.escape(regime_text, quote=False)}",
+        "",
+        "<b>ML ENSEMBLE</b>",
+        ml_section,
+        f"Last trained: {last_trained_text}",
+        f"Next retrain: {_next_retrain_text(context)}",
+        "",
+        "<b>DERIVATIVES</b>",
+        f"Funding rates: {n_funding} symbols",
+        f"Open Interest: {n_oi} symbols",
+        cme_status,
+        "",
+        "<b>MACRO</b>",
+        _format_fear_greed_text(fear_greed),
+        _format_dxy_text(dxy),
+        _format_btc_dominance_text(btc_dominance),
+        "",
+        "<b>TRADING</b>",
+        f"\U0001F4CA Active trades: {active_trades}",
+        f"\U0001F4BC Portfolio risk: {total_risk:.1f}% (of 6% cap)",
+        f"\U0001F4C8 Predictions logged: {predictions_logged}",
+        f"\U0001F4D3 Closed trades: {closed_trades}",
+        "",
+        "<b>SCHEDULING</b>",
+        "Daily briefing: 7:00 AM London",
+        "Trade scan: 7:00 AM + 7:00 PM London",
+        "Weekly reflection: Sunday 8:00 AM UTC",
+        "ML retrain: Saturday 6:00 AM London",
+        "Dead money check: every 4 hours",
+        f"WebSocket: {html.escape(ws_state, quote=False)}",
+        "",
+        f"CG budget: {cg_used:,}/{cg_limit:,}",
+    ]
+
+    await _send_long_message(context.bot, update.effective_chat.id, "\n".join(lines))
 
 
 async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1398,7 +1563,7 @@ def _symbol_grid(items: list[WatchlistItem]) -> str:
     return "\n".join(lines)
 
 
-def _status_label(ok: bool) -> str:
+def _legacy_status_label(ok: bool) -> str:
     return "✅ Operational" if ok else "❌ Degraded"
 
 
@@ -1455,6 +1620,205 @@ def _uptime_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     if days > 0:
         return f"{days}d {hours}h {minutes}m"
     return f"{hours}h {minutes}m"
+
+
+def _status_label(ok: bool | None) -> str:
+    if ok is True:
+        return "\u2705 Operational"
+    if ok is False:
+        return "\u274C Degraded"
+    return "\u26AA Unknown"
+
+
+def _format_subsystem_line(name: str, ok: bool | None) -> str:
+    return f"{_status_label(ok)} {html.escape(name, quote=False)}"
+
+
+def _format_agent_pipeline_line(status_text: str) -> str:
+    escaped_status = html.escape(status_text, quote=False)
+    if status_text.startswith("Ready"):
+        return "\u2705 Multi-agent debate (Groq Llama 3.3 70B)"
+    if status_text == "Initializing":
+        return "\u26AA Multi-agent debate (initializing)"
+    return f"\u274C Multi-agent debate ({escaped_status})"
+
+
+def _memory_usage_text() -> str:
+    memory_mb = _memory_usage_mb()
+    return f"{memory_mb}MB" if memory_mb is not None else "unavailable"
+
+
+def _memory_usage_mb() -> int | None:
+    cgroup_paths = (
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+    )
+    for path in cgroup_paths:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = int(handle.read().strip())
+        except Exception:
+            continue
+        if value > 0:
+            return int(round(value / (1024 * 1024)))
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        value = psutil.Process().memory_info().rss
+        return int(round(value / (1024 * 1024)))
+    except Exception:
+        pass
+
+    try:
+        import resource
+
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        if value <= 0:
+            return None
+        if value > 10_000_000:
+            return int(round(value / (1024 * 1024)))
+        return int(round(value / 1024))
+    except Exception:
+        return None
+
+
+def _format_ml_status_lines(
+    ensemble_obj: object,
+    crypto_symbols: list[str],
+) -> tuple[str, str]:
+    if not isinstance(ensemble_obj, MLEnsemble):
+        return "Not initialized", "Never"
+
+    symbols = sorted(set(crypto_symbols))
+    loaded_symbols = sorted(str(symbol).upper() for symbol in ensemble_obj._models)
+    for symbol in loaded_symbols:
+        if symbol not in symbols:
+            symbols.append(symbol)
+
+    lines: list[str] = []
+    trained_at_values: list[float] = []
+    for symbol in symbols:
+        models = ensemble_obj._get_models(symbol)
+        if models is None:
+            lines.append(f"   {html.escape(symbol)}: no model (insufficient data)")
+            continue
+
+        trained_at = float(models.get("trained_at", 0.0) or 0.0)
+        n_samples = int(models.get("n_samples", 0) or 0)
+        age_days = max((time.time() - trained_at) / 86400, 0.0) if trained_at > 0 else 0.0
+        lines.append(f"   {html.escape(symbol)}: {n_samples} samples ({age_days:.0f}d ago)")
+        if trained_at > 0:
+            trained_at_values.append(trained_at)
+
+    if not lines:
+        lines.append("   No crypto symbols tracked")
+
+    last_trained_text = _format_timestamp(max(trained_at_values)) if trained_at_values else "Never"
+    return "\n".join(lines), last_trained_text
+
+
+def _format_timestamp(timestamp: float) -> str:
+    dt = datetime.fromtimestamp(timestamp, ZoneInfo("UTC"))
+    hour_12 = dt.hour % 12 or 12
+    return f"{dt:%Y-%m-%d} {hour_12}:{dt:%M %p} {dt:%Z}"
+
+
+def _next_retrain_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    job_queue = context.application.job_queue
+    if job_queue is not None and hasattr(job_queue, "get_jobs_by_name"):
+        jobs = job_queue.get_jobs_by_name("weekly_ml_training")
+        if jobs:
+            next_run = getattr(jobs[0], "next_t", None) or getattr(jobs[0], "next_run_time", None)
+            if isinstance(next_run, datetime):
+                hour_12 = next_run.hour % 12 or 12
+                return f"{next_run:%Y-%m-%d} {hour_12}:{next_run:%M %p} {next_run:%Z}"
+
+    tz = ZoneInfo(settings.timezone)
+    now = datetime.now(tz)
+    days_until_saturday = (5 - now.weekday()) % 7
+    next_run = now.replace(hour=6, minute=0, second=0, microsecond=0) + timedelta(days=days_until_saturday)
+    if next_run <= now:
+        next_run = next_run + timedelta(days=7)
+    hour_12 = next_run.hour % 12 or 12
+    return f"{next_run:%Y-%m-%d} {hour_12}:{next_run:%M %p} {next_run:%Z}"
+
+
+def _format_cme_gap_status(cme_gap: object) -> str:
+    gap_low = getattr(cme_gap, "gap_low", None)
+    gap_high = getattr(cme_gap, "gap_high", None)
+    distance_pct = getattr(cme_gap, "distance_pct", None)
+    filled = bool(getattr(cme_gap, "filled", True))
+    if gap_low is None or gap_high is None or filled:
+        return "CME gap: none detected"
+    return f"CME gap: ${float(gap_low):,.0f}-${float(gap_high):,.0f} ({float(distance_pct or 0.0):.1f}% away)"
+
+
+def _format_fear_greed_text(fear_greed: object) -> str:
+    value = getattr(fear_greed, "value", None)
+    classification = getattr(fear_greed, "classification", None)
+    if value is None or classification is None:
+        return "Fear &amp; Greed: unavailable"
+    return f"\U0001F630 Fear &amp; Greed: {int(value)} ({html.escape(str(classification), quote=False)})"
+
+
+def _format_dxy_text(dxy: object) -> str:
+    current = getattr(dxy, "current", None)
+    if current is None:
+        return "DXY: unavailable"
+    return f"\U0001F4B5 DXY: {float(current):.2f}"
+
+
+def _format_btc_dominance_text(btc_dominance: object) -> str:
+    dominance_pct = getattr(btc_dominance, "dominance_pct", None)
+    if dominance_pct is None:
+        return "BTC Dominance: unavailable"
+    return f"\U0001F451 BTC Dominance: {float(dominance_pct):.1f}%"
+
+
+def _regime_status_text(regime: object) -> str:
+    regime_value = getattr(regime, "regime", None)
+    if regime_value is None:
+        return "Unknown"
+    if hasattr(regime_value, "value"):
+        regime_value = regime_value.value
+    return str(regime_value).replace("_", " ").title()
+
+
+def _correlation_pair_count(bot_data: dict[object, object]) -> int:
+    lead_lag_pairs = bot_data.get("lead_lag_pairs")
+    if isinstance(lead_lag_pairs, dict) and lead_lag_pairs:
+        return len(lead_lag_pairs)
+
+    correlation_engine = bot_data.get("correlation_engine")
+    symbols = getattr(correlation_engine, "_symbols", None)
+    if isinstance(symbols, list) and len(symbols) >= 2:
+        return 5
+    return 0
+
+
+async def _load_status_trade_counts(db_path: str) -> tuple[int, int, int]:
+    try:
+        async with aiosqlite.connect(db_path) as connection:
+            active_cursor = await connection.execute(
+                "SELECT COUNT(*) FROM trade_log WHERE status = 'active'"
+            )
+            closed_cursor = await connection.execute(
+                "SELECT COUNT(*) FROM trade_log WHERE status LIKE 'closed_%'"
+            )
+            predictions_cursor = await connection.execute("SELECT COUNT(*) FROM predictions")
+
+            active_row = await active_cursor.fetchone()
+            closed_row = await closed_cursor.fetchone()
+            predictions_row = await predictions_cursor.fetchone()
+    except Exception:
+        logger.exception("Status command failed while loading trading stats")
+        return 0, 0, 0
+
+    active = int(active_row[0] or 0) if active_row else 0
+    closed = int(closed_row[0] or 0) if closed_row else 0
+    predictions = int(predictions_row[0] or 0) if predictions_row else 0
+    return active, closed, predictions
 
 
 def _db_from_context(context: ContextTypes.DEFAULT_TYPE) -> Database:
