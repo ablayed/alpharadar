@@ -1,5 +1,5 @@
 """
-Event classification with Groq-first inference and SQLite-backed caching.
+Event classification with LLM-first inference and SQLite-backed caching.
 """
 from __future__ import annotations
 
@@ -11,13 +11,14 @@ from typing import Protocol
 
 import aiosqlite
 
+from src.agents.providers import LLMRole
 from src.events.calibration import compute_remaining_drift, get_car_profile
 from src.events.models import DetectedEvent, EventType
 from src.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "groq-llama-3.3-70b-event-v1"
+MODEL_VERSION = "multi-provider-qwen3-event-v2"
 FALLBACK_MODEL_VERSION = "keyword-event-v1"
 EVENT_TYPES_STR = "\n".join(
     f"  - {event_type.value}"
@@ -50,6 +51,7 @@ class _JSONGenerator(Protocol):
         user_prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
+        role: LLMRole = LLMRole.GENERAL,
     ) -> object: ...
 
 
@@ -87,9 +89,9 @@ class EventClassifier:
                 try:
                     fresh = await self._classify_batch_with_llm(uncached_texts)
                     await self._store_cached(fresh, MODEL_VERSION)
-                    logger.info("Event classification: %s uncached headlines via Groq", len(fresh))
+                    logger.info("Event classification: %s uncached headlines via LLM", len(fresh))
                 except Exception:
-                    logger.exception("Groq event classification failed; using keyword fallback")
+                    logger.exception("LLM event classification failed; using keyword fallback")
                     fresh = self._classify_batch_with_keywords(uncached_texts)
                     await self._store_cached(fresh, FALLBACK_MODEL_VERSION)
             else:
@@ -110,11 +112,11 @@ class EventClassifier:
         self,
         headlines: list[str],
     ) -> dict[str, tuple[EventType, float]]:
-        """Classify only uncached unique headlines with Groq."""
+        """Classify only uncached unique headlines with the shared LLM."""
 
         llm = self._llm
         if llm is None:
-            raise RuntimeError("Groq client is not configured")
+            raise RuntimeError("LLM client is not configured")
 
         numbered = "\n".join(f"[{index}] {headline}" for index, headline in enumerate(headlines))
         user_prompt = f"Classify these headlines:\n\n{numbered}"
@@ -123,11 +125,12 @@ class EventClassifier:
             user_prompt=user_prompt,
             temperature=0.0,
             max_tokens=1024,
+            role=LLMRole.GENERAL,
         )
 
         classifications = _extract_classifications(result)
         if not classifications:
-            raise ValueError("Groq returned no usable event classifications")
+            raise ValueError("LLM returned no usable event classifications")
         mapped: dict[str, tuple[EventType, float]] = {}
         for index, headline in enumerate(headlines):
             match = next(

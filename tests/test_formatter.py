@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from src.agents.state import AgentAnalysis, DebateVerdict
+from src.agents.state import AgentAnalysis, DebateVerdict, LLMUsageSummary
 from src.data.derivatives import CMEGap
 from src.data.macro import BTCDominanceData, DXYData, FearGreedData
 from src.briefing.formatter import (
@@ -216,6 +216,36 @@ def _sample_agent_analysis() -> AgentAnalysis:
                 selection_reason="+3.2% move",
             )
         ],
+        llm_usage=[
+            LLMUsageSummary(
+                role="general",
+                provider="groq",
+                model="qwen/qwen3-32b",
+                model_display="Qwen3-32B",
+                calls=3,
+            ),
+            LLMUsageSummary(
+                role="bull",
+                provider="groq",
+                model="qwen/qwen3-32b",
+                model_display="Qwen3-32B",
+                calls=1,
+            ),
+            LLMUsageSummary(
+                role="bear",
+                provider="groq",
+                model="qwen/qwen3-32b",
+                model_display="Qwen3-32B",
+                calls=1,
+            ),
+            LLMUsageSummary(
+                role="judge",
+                provider="gemini",
+                model="gemini-2.5-pro",
+                model_display="Gemini 2.5 Pro",
+                calls=1,
+            ),
+        ],
         total_llm_calls=6,
         pipeline_duration_seconds=12.3,
     )
@@ -287,6 +317,8 @@ def test_format_daily_includes_ai_deep_dive_when_present() -> None:
     assert "<b>Risk:</b>" in text
     assert "Watch:" in text
     assert "Pipeline: 6 LLM calls in 12.3s" in text
+    assert "General: Groq / Qwen3-32B (3 calls)" in text
+    assert "Judge: Gemini / Gemini 2.5 Pro (1 call)" in text
 
 
 def test_format_daily_simplifies_market_regime_section() -> None:

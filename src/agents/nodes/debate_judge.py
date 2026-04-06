@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.agents.providers import LLMRole
+
 
 SYSTEM_PROMPT = """You are an expert financial debate judge evaluating bull vs bear cases.
 
@@ -113,6 +115,7 @@ Deliver a decisive verdict for {symbol}. Choose the side with the stronger evide
             system_prompt=_system_prompt(state),
             user_prompt=user_prompt,
             temperature=0.0,
+            role=LLMRole.JUDGE,
         )
         result["symbol"] = symbol
         result["display_name"] = symbol

@@ -18,12 +18,18 @@ class PredictionRecord:
     created_at: str = ""
     outcome_recorded: bool = False
     actual_price_1d: float | None = None
+    actual_price_3d: float | None = None
     actual_price_5d: float | None = None
+    actual_price_7d: float | None = None
     actual_direction: str | None = None
     actual_change_1d_pct: float | None = None
+    actual_change_3d_pct: float | None = None
     actual_change_5d_pct: float | None = None
+    actual_change_7d_pct: float | None = None
     is_correct_1d: int | None = None
+    is_correct_3d: int | None = None
     is_correct_5d: int | None = None
+    is_correct_7d: int | None = None
     outcome_recorded_at: str | None = None
 
 

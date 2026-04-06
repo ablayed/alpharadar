@@ -67,12 +67,13 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
         days=tuple(range(7)),
         name="crypto_reference_prices",
     )
-    job_queue.run_daily(
-        callback=record_prediction_outcomes,
-        time=datetime.time(hour=22, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
-        days=tuple(range(7)),
-        name="record_prediction_outcomes",
-    )
+    for hour in (10, 22):
+        job_queue.run_daily(
+            callback=record_prediction_outcomes,
+            time=datetime.time(hour=hour, minute=0, second=0, tzinfo=ZoneInfo("UTC")),
+            days=tuple(range(7)),
+            name=f"record_prediction_outcomes_{hour:02d}",
+        )
     job_queue.run_daily(
         callback=weekly_ml_training,
         time=datetime.time(hour=6, minute=0, second=0, tzinfo=ZoneInfo(settings.timezone)),

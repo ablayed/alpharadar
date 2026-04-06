@@ -69,3 +69,22 @@ async def test_setup_scheduler_registers_weekly_ml_training_for_saturday() -> No
     assert weekly_ml["days"] == (6,)
     assert weekly_ml["time"].hour == 6
     assert weekly_ml["time"].minute == 0
+
+
+@pytest.mark.asyncio
+async def test_setup_scheduler_registers_outcome_jobs_for_10_and_22_utc() -> None:
+    job_queue = _FakeJobQueue()
+    application = SimpleNamespace(job_queue=job_queue)
+
+    await setup_scheduler(application)
+
+    outcome_jobs = [
+        call for call in job_queue.daily_calls
+        if call["name"] in {"record_prediction_outcomes_10", "record_prediction_outcomes_22"}
+    ]
+
+    assert len(outcome_jobs) == 2
+    assert {call["time"].hour for call in outcome_jobs} == {10, 22}
+    assert all(call["time"].minute == 0 for call in outcome_jobs)
+    assert all(getattr(call["time"].tzinfo, "key", None) == "UTC" for call in outcome_jobs)
+    assert all(call["days"] == tuple(range(7)) for call in outcome_jobs)

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
+from src.agents.providers import LLMRole
 from src.reflection.evaluator import expected_calibration_error
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,9 @@ async def run_weekly_reflection(db_path: str, llm_client: object | None) -> str 
             SELECT symbol, predicted_direction, confidence, reasoning,
                    actual_direction, actual_change_1d_pct, is_correct_1d,
                    event_type, source, price_at_prediction, actual_price_1d,
-                   is_correct_5d
+                   actual_change_3d_pct, is_correct_3d,
+                   actual_change_5d_pct, is_correct_5d,
+                   actual_change_7d_pct, is_correct_7d
             FROM predictions
             WHERE outcome_recorded = 1
               AND created_at BETWEEN ? AND ?
@@ -63,15 +66,11 @@ async def run_weekly_reflection(db_path: str, llm_client: object | None) -> str 
         logger.info("Weekly reflection skipped: only %d resolved predictions", len(rows))
         return None
 
-    correct = sum(1 for row in rows if int(row[6] or 0) == 1)
+    accuracy_1d, correct_1d, total_1d = _accuracy_summary(rows, outcome_index=6)
+    accuracy_3d, correct_3d, total_3d = _accuracy_summary(rows, outcome_index=12)
+    accuracy_5d, correct_5d, total_5d = _accuracy_summary(rows, outcome_index=14)
+    accuracy_7d, correct_7d, total_7d = _accuracy_summary(rows, outcome_index=16)
     total = len(rows)
-    accuracy_1d = (correct / total) * 100.0
-    rows_with_5d = [row for row in rows if row[11] is not None]
-    accuracy_5d = (
-        sum(1 for row in rows_with_5d if int(row[11] or 0) == 1) / len(rows_with_5d) * 100.0
-        if rows_with_5d
-        else None
-    )
     avg_confidence = sum(float(row[2]) for row in rows) / total
     calibration_error = expected_calibration_error(
         [float(row[2]) for row in rows],
@@ -84,19 +83,29 @@ async def run_weekly_reflection(db_path: str, llm_client: object | None) -> str 
     low_accuracy = _accuracy_pct(low_confidence_rows)
 
     hits_text = "\n".join(
-        f"  {row[0]}: predicted {row[1]} ({float(row[2]):.0%}) -> {row[4]} ({float(row[5] or 0):+.1f}%)"
+        f"  {row[0]}: predicted {row[1]} ({float(row[2]):.0%}) -> {row[4]} "
+        f"(1d {float(row[5] or 0):+.1f}%, 3d {float(row[11] or 0):+.1f}%, 7d {float(row[15] or 0):+.1f}%)"
         for row in rows
         if int(row[6] or 0) == 1
     ) or "  None"
     misses_text = "\n".join(
-        f"  {row[0]}: predicted {row[1]} ({float(row[2]):.0%}) -> {row[4]} ({float(row[5] or 0):+.1f}%)"
+        f"  {row[0]}: predicted {row[1]} ({float(row[2]):.0%}) -> {row[4]} "
+        f"(1d {float(row[5] or 0):+.1f}%, 3d {float(row[11] or 0):+.1f}%, 7d {float(row[15] or 0):+.1f}%)"
         for row in rows
         if int(row[6] or 0) == 0
     ) or "  None"
 
     user_prompt = f"""Week: {week_start[:10]} to {week_end[:10]}
 Total predictions: {total}
-Accuracy: {accuracy_1d:.1f}% ({correct}/{total})
+Prediction outcomes at multiple timeframes:
+- 1-day accuracy: {accuracy_1d:.1f}% ({correct_1d}/{total_1d})
+- 3-day accuracy: {accuracy_3d:.1f}% ({correct_3d}/{total_3d})
+- 5-day accuracy: {accuracy_5d:.1f}% ({correct_5d}/{total_5d})
+- 7-day accuracy: {accuracy_7d:.1f}% ({correct_7d}/{total_7d})
+
+If 7-day accuracy is higher than 1-day accuracy, the bot's directional calls are correct but the timing is early. Consider wider entry zones or longer hold periods.
+If 7-day accuracy is lower than 1-day accuracy, the bot catches short-term moves but reversals happen later. Consider tighter take profits.
+
 Average confidence: {avg_confidence:.0%}
 Calibration error: {calibration_error:.3f}
 High confidence (>=70%) accuracy: {high_accuracy:.1f}% ({len(high_confidence_rows)} predictions)
@@ -116,6 +125,7 @@ Analyze these results and provide the weekly reflection."""
             user_prompt=user_prompt,
             temperature=0.0,
             max_tokens=800,
+            role=LLMRole.REFLECTION,
         )
         reflection_payload = result if isinstance(result, dict) else {"raw": str(result)}
         reflection_text = json.dumps(reflection_payload, indent=2)
@@ -188,6 +198,20 @@ def _accuracy_pct(rows: list[tuple[object, ...]]) -> float:
         return 0.0
     correct = sum(1 for row in rows if int(row[6] or 0) == 1)
     return (correct / len(rows)) * 100.0
+
+
+def _accuracy_summary(
+    rows: list[tuple[object, ...]],
+    *,
+    outcome_index: int,
+) -> tuple[float, int, int]:
+    eligible_rows = [row for row in rows if row[outcome_index] is not None]
+    if not eligible_rows:
+        return 0.0, 0, 0
+
+    correct = sum(1 for row in eligible_rows if int(row[outcome_index] or 0) == 1)
+    total = len(eligible_rows)
+    return (correct / total) * 100.0, correct, total
 
 
 def _sqlite_timestamp(value: datetime) -> str:

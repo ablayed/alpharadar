@@ -48,11 +48,24 @@ class DebateVerdict:
 
 
 @dataclass(slots=True)
+class LLMUsageSummary:
+    """Aggregated provider usage for a group of LLM calls."""
+
+    role: str
+    provider: str
+    model: str
+    model_display: str
+    calls: int
+    tokens_used: int = 0
+
+
+@dataclass(slots=True)
 class AgentAnalysis:
     """Complete output of the agent pipeline, attached to BriefingData."""
 
     analyst_reports: list[AnalystReport] = field(default_factory=list)
     debate_verdicts: list[DebateVerdict] = field(default_factory=list)
+    llm_usage: list[LLMUsageSummary] = field(default_factory=list)
     total_llm_calls: int = 0
     pipeline_duration_seconds: float = 0.0
 

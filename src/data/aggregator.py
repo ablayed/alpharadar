@@ -16,6 +16,7 @@ import numpy as np
 
 from src.briefing.models import BriefingData
 from src.config import Settings
+from src.agents.providers import LLMRole
 from src.correlation import (
     CorrelationEngine,
     CorrelationSnapshot,
@@ -71,12 +72,15 @@ from src.ta.signals import TASignal, compute_signals
 if TYPE_CHECKING:
     from src.agents.graph import AgentPipeline
     from src.agents.llm import GeminiClient
-    from src.agents.state import AgentAnalysis
+    from src.agents.state import AgentAnalysis, LLMUsageSummary
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 PRICE_TARGET_RE = re.compile(r"\$([0-9][0-9,]*(?:\.\d+)?)")
 SIGNAL_CONTEXT_PROXIES = ("SPY", "QQQ", "VIXY")
+CRYPTO_SYMBOL_ALIASES = {
+    "RENDER": "RNDR",
+}
 
 PLAYBOOK_SYSTEM_PROMPT = """You are a financial analyst writing a daily playbook for someone
 who is not a trader and does not know technical jargon.
@@ -737,11 +741,24 @@ class DataAggregator:
     def agent_pipeline_status_text(self) -> str:
         if self.settings.llm_api_key is None:
             return "No GROQ_API_KEY or GEMINI_API_KEY set"
+        llm_status = self.llm_provider_status()
         if self._agent_pipeline is not None:
-            return "Ready (Groq Llama 3.3 70B)"
+            if llm_status["groq"] and llm_status["gemini"]:
+                return "Ready | Groq Qwen3-32B primary, Gemini 2.5 Pro for judge/reflection"
+            if llm_status["groq"]:
+                return "Ready | Groq Qwen3-32B primary with Llama 3.3 fallback"
+            if llm_status["gemini"]:
+                return "Ready | Gemini-only fallback mode"
+            return "Ready"
         if self._agent_pipeline_init_error is not None:
             return "Configured but unavailable"
         return "Initializing"
+
+    def llm_provider_status(self) -> dict[str, bool]:
+        return {
+            "groq": self.settings.groq_api_key is not None,
+            "gemini": self.settings.gemini_api_key is not None,
+        }
 
     async def provider_health(self) -> dict[str, bool]:
         results = await asyncio.gather(
@@ -1202,14 +1219,17 @@ class DataAggregator:
         await self._log_analysis_predictions(analysis, briefing_data, source=source)
         return analysis
 
-    async def generate_playbook(self, briefing_data: BriefingData) -> tuple[str, int, float]:
+    async def generate_playbook(
+        self,
+        briefing_data: BriefingData,
+    ) -> tuple[str, int, float, list[LLMUsageSummary]]:
         notable_assets = self._notable_assets_for_playbook(briefing_data)
         if not notable_assets:
-            return ("No assets met today's notable threshold.", 0, 0.0)
+            return ("No assets met today's notable threshold.", 0, 0.0, [])
 
         llm = await self._ensure_llm_client()
         if llm is None:
-            raise RuntimeError("Groq client is not available")
+            raise RuntimeError("No LLM provider is available")
 
         asset_blocks: list[str] = []
         for asset in notable_assets:
@@ -1253,16 +1273,19 @@ class DataAggregator:
         )
 
         started_at = time.perf_counter()
+        usage_marker = llm.mark_usage()
         response = await llm.generate(
             system_prompt=PLAYBOOK_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.1,
             max_tokens=max(900, min(2600, 220 * len(notable_assets))),
+            role=LLMRole.PLAYBOOK,
         )
         duration = round(time.perf_counter() - started_at, 1)
+        llm_usage = llm.usage_since(usage_marker)
         playbook_text = response.strip()
         await self._log_playbook_predictions(playbook_text, notable_assets)
-        return playbook_text, 1, duration
+        return playbook_text, 1, duration, llm_usage
 
     def _notable_assets_for_playbook(self, briefing_data: BriefingData) -> list[dict[str, object]]:
         latest_news_by_symbol: dict[str, NewsItem] = {}
@@ -1513,7 +1536,7 @@ class DataAggregator:
             self._agent_pipeline = None
             self._gemini_client = None
             self._agent_pipeline_init_error = f"{type(exc).__name__}: {exc}"
-            logger.exception("Agent pipeline initialization failed; continuing without Groq")
+            logger.exception("Agent pipeline initialization failed; continuing without LLM access")
 
         return self._agent_pipeline
 
@@ -1525,19 +1548,23 @@ class DataAggregator:
 
         from src.agents.llm import GeminiClient
 
-        api_key = self.settings.llm_api_key.get_secret_value()
-        gemini = GeminiClient(api_key=api_key)
+        gemini = GeminiClient()
         await gemini.initialize()
         self._gemini_client = gemini
         return gemini
 
     async def _coin_id_map(self) -> dict[str, str]:
         watchlist = await self.db.get_watchlist("crypto")
-        return {
+        coin_map = {
             item.symbol.upper(): item.coingecko_id
             for item in watchlist
             if item.coingecko_id is not None
         }
+        for alias, canonical in CRYPTO_SYMBOL_ALIASES.items():
+            coin_id = coin_map.get(canonical)
+            if coin_id is not None:
+                coin_map.setdefault(alias, coin_id)
+        return coin_map
 
     async def _log_analysis_predictions(
         self,

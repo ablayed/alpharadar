@@ -116,12 +116,15 @@ class AgentPipeline:
         initial_state["debate_verdicts"] = []
 
         logger.info("Starting agent pipeline")
+        usage_marker = self._llm.mark_usage()
         final_state = await self._graph.ainvoke(initial_state)
         duration = round(time.perf_counter() - started_at, 1)
         llm_calls = int(final_state.get("llm_call_count", 0))
+        llm_usage = self._llm.usage_since(usage_marker)
         logger.info("Agent pipeline complete: %s calls in %.1fs", llm_calls, duration)
 
         analysis = AgentAnalysis(
+            llm_usage=llm_usage,
             total_llm_calls=llm_calls,
             pipeline_duration_seconds=duration,
         )

@@ -18,6 +18,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Defaults
 
 from src.alerts import AlertPipeline, binance_ws_loop
+from src.agents.providers import init_provider
 from src.bot.handlers import (
     accuracy_command,
     add_command,
@@ -77,6 +78,15 @@ logger = logging.getLogger(__name__)
 
 async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> None:
     """Initialize shared resources after application starts."""
+    init_provider(
+        groq_key=(settings.groq_api_key.get_secret_value() if settings.groq_api_key is not None else None),
+        gemini_key=(
+            settings.gemini_api_key.get_secret_value()
+            if settings.gemini_api_key is not None
+            else None
+        ),
+    )
+
     db = Database(settings.db_path)
     await db.initialize()
 

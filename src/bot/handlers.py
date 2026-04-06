@@ -11,7 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.alerts import AlertPipeline, AlertSeverity
-from src.agents.state import AgentAnalysis, DebateVerdict
+from src.agents.state import AgentAnalysis, DebateVerdict, LLMUsageSummary
 from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
 from src.briefing.models import BriefingData
@@ -144,7 +144,7 @@ def _help_text() -> str:
         "/portfolio  Show tracked trade risk and stale positions\n"
         "/ta NVDA  Compute local technical analysis for one symbol\n"
         "/alerts  Show real-time alert pipeline status\n"
-        "/accuracy  Show prediction accuracy and calibration buckets\n"
+        "/accuracy  Show multi-timeframe prediction accuracy\n"
         "/reflect  Show the latest weekly self-reflection\n"
         "/status  API usage and system health\n"
         "/help  Show this message"
@@ -630,16 +630,16 @@ async def playbook_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         # The playbook can still be generated without agent verdicts, which keeps
-        # the command reliable when the Groq-backed debate pipeline is unavailable
-        # or rate-limited.
+        # the command reliable when the debate pipeline is unavailable or rate-limited.
         data = await _latest_briefing_data(context, include_agent_analysis=False)
         _store_latest_briefing(context, data)
-        playbook_text, llm_calls, duration = await aggregator.generate_playbook(data)
+        playbook_text, llm_calls, duration, llm_usage = await aggregator.generate_playbook(data)
         message = _format_playbook_message(
             generated_at=data.generated_at,
             playbook_text=playbook_text,
             llm_calls=llm_calls,
             duration=duration,
+            llm_usage=llm_usage,
         )
         await _send_long_message(
             context.bot,
@@ -1129,15 +1129,25 @@ async def accuracy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return "No data"
         return f"{stats.correct}/{stats.total} ({stats.accuracy:.1f}%)"
 
-    text = (
-        "\U0001F4CA <b>PREDICTION ACCURACY</b>\n\n"
-        f"<b>All-time:</b> {fmt(snapshot['all_time'])}\n"
-        f"<b>Last 7 days:</b> {fmt(snapshot['last_7d'])}\n\n"
-        f"<b>High confidence (70%+):</b> {fmt(snapshot['high_confidence'])}\n"
-        f"<b>Low confidence (&lt;70%):</b> {fmt(snapshot['low_confidence'])}\n\n"
-        "<i>Predictions logged from briefings, /analyze, /playbook, and trade signals</i>"
-    )
-    await update.message.reply_text(text)
+    lines = [
+        "\U0001F4CA <b>PREDICTION ACCURACY</b>",
+        "",
+        f"<b>All-time:</b> {snapshot.all_time_predictions} predictions",
+        "",
+        f"<b>1-day accuracy:</b> {fmt(snapshot.one_day)}",
+        f"<b>3-day accuracy:</b> {fmt(snapshot.three_day)}",
+        f"<b>7-day accuracy:</b> {fmt(snapshot.seven_day)}",
+        "",
+        f"<b>High confidence (70%+):</b> {fmt(snapshot.high_confidence_1d)} @ 1d",
+        f"<b>Low confidence (&lt;70%):</b> {fmt(snapshot.low_confidence_1d)} @ 1d",
+    ]
+
+    if snapshot.by_source_1d:
+        lines.extend(["", "<b>By source (@ 1d):</b>"])
+        for source, stats in snapshot.by_source_1d.items():
+            lines.append(f"{html.escape(source)}: {fmt(stats)}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1391,6 +1401,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     total_risk = portfolio.get_total_risk() if isinstance(portfolio, PortfolioTracker) else 0.0
 
     agent_status = aggregator.agent_pipeline_status_text()
+    llm_status = aggregator.llm_provider_status()
     correlation_pair_count = _correlation_pair_count(bot_data)
     ws_state = _websocket_status_text(context)
     uptime = _uptime_text(context)
@@ -1416,6 +1427,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "<b>ANALYSIS ENGINE</b>",
         _format_subsystem_line("FinBERT sentiment (ONNX)", aggregator.sentiment_analyzer.is_available()),
         _format_agent_pipeline_line(agent_status),
+        _format_subsystem_line("Groq (Qwen3-32B + Llama fallback)", llm_status.get("groq")),
+        _format_subsystem_line("Gemini (2.5 Pro + Flash fallback)", llm_status.get("gemini")),
         _format_subsystem_line("Technical analysis (14 indicators)", True),
         _format_subsystem_line("SMC detection (FVG + BOS + Order Blocks)", True),
         _format_subsystem_line(
@@ -1637,7 +1650,7 @@ def _format_subsystem_line(name: str, ok: bool | None) -> str:
 def _format_agent_pipeline_line(status_text: str) -> str:
     escaped_status = html.escape(status_text, quote=False)
     if status_text.startswith("Ready"):
-        return "\u2705 Multi-agent debate (Groq Llama 3.3 70B)"
+        return f"\u2705 Multi-agent debate ({escaped_status})"
     if status_text == "Initializing":
         return "\u26AA Multi-agent debate (initializing)"
     return f"\u274C Multi-agent debate ({escaped_status})"
@@ -2567,6 +2580,7 @@ def _format_playbook_message(
     playbook_text: str,
     llm_calls: int,
     duration: float,
+    llm_usage: list[LLMUsageSummary],
 ) -> str:
     header = (
         "\U0001F4CB <b>ALPHARADAR DAILY PLAYBOOK</b>\n"
@@ -2577,7 +2591,15 @@ def _format_playbook_message(
     footer = ""
     if llm_calls > 0:
         label = "call" if llm_calls == 1 else "calls"
-        footer = f"<i>\U0001F9E0 {llm_calls} LLM {label} in {duration:.1f}s</i>"
+        lines = [f"<i>\U0001F9E0 {llm_calls} LLM {label} in {duration:.1f}s</i>"]
+        for usage in llm_usage:
+            call_label = "call" if usage.calls == 1 else "calls"
+            lines.append(
+                f"<i>   {html.escape(usage.role.title(), quote=False)}: "
+                f"{html.escape(usage.provider.title(), quote=False)} / "
+                f"{html.escape(usage.model_display, quote=False)} ({usage.calls} {call_label})</i>"
+            )
+        footer = "\n".join(lines)
     return "\n\n".join(part for part in [header, body, footer] if part)
 
 

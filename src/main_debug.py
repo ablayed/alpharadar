@@ -151,9 +151,19 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     logger.info("post_init: Starting initialization...")
 
     from src.config import settings
+    from src.agents.providers import init_provider
     from src.storage.database import Database
     from src.data.aggregator import DataAggregator
     from src.briefing.formatter import BriefingFormatter
+
+    init_provider(
+        groq_key=(settings.groq_api_key.get_secret_value() if settings.groq_api_key is not None else None),
+        gemini_key=(
+            settings.gemini_api_key.get_secret_value()
+            if settings.gemini_api_key is not None
+            else None
+        ),
+    )
 
     logger.info("post_init: Initializing database...")
     db = Database(settings.db_path)

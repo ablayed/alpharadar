@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from src.agents.providers import LLMRole
 from src.agents.nodes.mover_selector import mover_selector_node
 from src.agents.state import AgentAnalysis
 from src.briefing.models import BriefingData
@@ -132,8 +133,9 @@ class FakeLLM:
         user_prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
+        role: LLMRole = LLMRole.GENERAL,
     ) -> object:
-        del system_prompt, user_prompt, temperature, max_tokens
+        del system_prompt, user_prompt, temperature, max_tokens, role
         self.calls += 1
         if self._responses:
             return self._responses.pop(0)

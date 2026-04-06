@@ -20,6 +20,17 @@ class AccuracyStats:
         return (self.correct / self.total) * 100.0
 
 
+@dataclass(slots=True)
+class AccuracySnapshot:
+    all_time_predictions: int
+    one_day: AccuracyStats
+    three_day: AccuracyStats
+    seven_day: AccuracyStats
+    high_confidence_1d: AccuracyStats
+    low_confidence_1d: AccuracyStats
+    by_source_1d: dict[str, AccuracyStats]
+
+
 def expected_calibration_error(
     confidences: list[float],
     outcomes: list[int],
@@ -55,41 +66,40 @@ class ReflectionEvaluator:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
 
-    async def accuracy_snapshot(self) -> dict[str, AccuracyStats]:
+    async def accuracy_snapshot(self) -> AccuracySnapshot:
         async with aiosqlite.connect(self._db_path) as connection:
-            return {
-                "all_time": await _query_accuracy(
+            return AccuracySnapshot(
+                all_time_predictions=await _query_total_predictions(connection),
+                one_day=await _query_accuracy(
                     connection,
-                    "SELECT COUNT(*), COALESCE(SUM(is_correct_1d), 0) FROM predictions WHERE outcome_recorded = 1",
+                    correctness_column="is_correct_1d",
+                    where_clause="is_correct_1d IS NOT NULL",
                 ),
-                "last_7d": await _query_accuracy(
+                three_day=await _query_accuracy(
                     connection,
-                    """
-                    SELECT COUNT(*), COALESCE(SUM(is_correct_1d), 0)
-                    FROM predictions
-                    WHERE outcome_recorded = 1
-                      AND created_at > datetime('now', '-7 days')
-                    """,
+                    correctness_column="is_correct_3d",
+                    where_clause="is_correct_3d IS NOT NULL",
                 ),
-                "high_confidence": await _query_accuracy(
+                seven_day=await _query_accuracy(
                     connection,
-                    """
-                    SELECT COUNT(*), COALESCE(SUM(is_correct_1d), 0)
-                    FROM predictions
-                    WHERE outcome_recorded = 1
-                      AND confidence >= 0.7
-                    """,
+                    correctness_column="is_correct_7d",
+                    where_clause="is_correct_7d IS NOT NULL",
                 ),
-                "low_confidence": await _query_accuracy(
+                high_confidence_1d=await _query_accuracy(
                     connection,
-                    """
-                    SELECT COUNT(*), COALESCE(SUM(is_correct_1d), 0)
-                    FROM predictions
-                    WHERE outcome_recorded = 1
-                      AND confidence < 0.7
-                    """,
+                    correctness_column="is_correct_1d",
+                    where_clause="is_correct_1d IS NOT NULL AND confidence >= 0.7",
                 ),
-            }
+                low_confidence_1d=await _query_accuracy(
+                    connection,
+                    correctness_column="is_correct_1d",
+                    where_clause="is_correct_1d IS NOT NULL AND confidence < 0.7",
+                ),
+                by_source_1d=await _query_accuracy_by_source(
+                    connection,
+                    correctness_column="is_correct_1d",
+                ),
+            )
 
     async def latest_reflection(self) -> ReflectionRecord | None:
         async with aiosqlite.connect(self._db_path) as connection:
@@ -136,9 +146,50 @@ class ReflectionEvaluator:
         return [str(lesson).strip() for lesson in lessons if str(lesson).strip()]
 
 
-async def _query_accuracy(connection: aiosqlite.Connection, query: str) -> AccuracyStats:
-    cursor = await connection.execute(query)
+async def _query_total_predictions(connection: aiosqlite.Connection) -> int:
+    cursor = await connection.execute("SELECT COUNT(*) FROM predictions")
+    row = await cursor.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+async def _query_accuracy(
+    connection: aiosqlite.Connection,
+    *,
+    correctness_column: str,
+    where_clause: str,
+) -> AccuracyStats:
+    cursor = await connection.execute(
+        f"""
+        SELECT COUNT(*), COALESCE(SUM({correctness_column}), 0)
+        FROM predictions
+        WHERE {where_clause}
+        """
+    )
     row = await cursor.fetchone()
     total = int(row[0]) if row and row[0] is not None else 0
     correct = int(row[1]) if row and row[1] is not None else 0
     return AccuracyStats(total=total, correct=correct)
+
+
+async def _query_accuracy_by_source(
+    connection: aiosqlite.Connection,
+    *,
+    correctness_column: str,
+) -> dict[str, AccuracyStats]:
+    cursor = await connection.execute(
+        f"""
+        SELECT source, COUNT(*), COALESCE(SUM({correctness_column}), 0)
+        FROM predictions
+        WHERE {correctness_column} IS NOT NULL
+        GROUP BY source
+        ORDER BY source
+        """
+    )
+    rows = await cursor.fetchall()
+    return {
+        str(row[0]): AccuracyStats(
+            total=int(row[1]) if row[1] is not None else 0,
+            correct=int(row[2]) if row[2] is not None else 0,
+        )
+        for row in rows
+    }

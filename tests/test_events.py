@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.agents.providers import LLMRole
 from src.briefing.formatter import _format_event_annotation
 from src.data.base import NewsItem
 from src.events.calibration import compute_remaining_drift, get_car_profile
@@ -21,8 +22,9 @@ class FakeEventLLM:
         user_prompt: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
+        role: LLMRole = LLMRole.GENERAL,
     ) -> object:
-        del system_prompt, user_prompt, temperature, max_tokens
+        del system_prompt, user_prompt, temperature, max_tokens, role
         self.calls += 1
         if self._responses:
             return self._responses.pop(0)

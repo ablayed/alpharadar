@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+from uuid import uuid4
+
 import aiosqlite
 import pytest
 
 from src.sentiment.analyzer import SentimentResult
 from src.sentiment.cache import SentimentCache
+from src.storage.database import Database
 
 
 @pytest.mark.asyncio
@@ -72,3 +76,57 @@ async def test_sentiment_cache_round_trip(db) -> None:
     cached = await cache.get_cached([headline])
     assert cached[headline] == result
     assert await db.get_sentiment_cache_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_adds_multi_timeframe_prediction_columns_to_legacy_db() -> None:
+    test_dir = Path(".test_tmp")
+    test_dir.mkdir(exist_ok=True)
+    db_path = test_dir / f"{uuid4().hex}.db"
+
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            """
+            CREATE TABLE predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                symbol TEXT NOT NULL,
+                asset_type TEXT NOT NULL,
+                event_type TEXT,
+                predicted_direction TEXT NOT NULL,
+                predicted_target REAL,
+                confidence REAL NOT NULL,
+                reasoning TEXT,
+                source TEXT NOT NULL,
+                price_at_prediction REAL NOT NULL,
+                outcome_recorded INTEGER NOT NULL DEFAULT 0,
+                actual_price_1d REAL,
+                actual_price_5d REAL,
+                actual_direction TEXT,
+                actual_change_1d_pct REAL,
+                actual_change_5d_pct REAL,
+                is_correct_1d INTEGER,
+                is_correct_5d INTEGER,
+                outcome_recorded_at TEXT
+            )
+            """
+        )
+        await conn.commit()
+
+    database = Database(str(db_path))
+    await database.initialize()
+
+    async with aiosqlite.connect(db_path) as conn:
+        cursor = await conn.execute("PRAGMA table_info(predictions)")
+        rows = await cursor.fetchall()
+
+    columns = {str(row[1]) for row in rows}
+    assert {
+        "actual_price_3d",
+        "actual_change_3d_pct",
+        "is_correct_3d",
+        "actual_price_7d",
+        "actual_change_7d_pct",
+        "is_correct_7d",
+    }.issubset(columns)
+    db_path.unlink(missing_ok=True)

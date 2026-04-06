@@ -4,7 +4,7 @@ import html
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from src.agents.state import AgentAnalysis, DebateVerdict
+from src.agents.state import AgentAnalysis, DebateVerdict, LLMUsageSummary
 from src.briefing.models import BriefingData
 from src.config import settings
 from src.data.base import AssetPrice, DeFiProtocol, NewsItem, SECFiling
@@ -486,6 +486,7 @@ class BriefingFormatter:
             f"<i>🧠 Pipeline: {analysis.total_llm_calls} LLM calls in "
             f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>"
         )
+        lines.extend(self._format_llm_usage_lines(analysis.llm_usage))
         return "\n\n".join(line for line in lines if line)
 
     def format_agent_verdict(self, symbol: str, analysis: AgentAnalysis) -> str | None:
@@ -508,6 +509,7 @@ class BriefingFormatter:
             "",
             f"<i>🧠 {analysis.total_llm_calls} LLM calls in "
             f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>",
+            *self._format_llm_usage_lines(analysis.llm_usage),
         ]
         return "\n".join(lines)
 
@@ -628,6 +630,7 @@ class BriefingFormatter:
             f"<i>🧠 Pipeline: {analysis.total_llm_calls} LLM calls in "
             f"{self._format_duration(analysis.pipeline_duration_seconds)}</i>"
         )
+        lines.extend(self._format_llm_usage_lines(analysis.llm_usage))
         return "\n\n".join(line for line in lines if line)
 
     def _format_briefing_verdict(self, verdict: DebateVerdict) -> list[str]:
@@ -732,6 +735,17 @@ class BriefingFormatter:
     @staticmethod
     def _format_duration(value: float) -> str:
         return f"{value:.1f}s"
+
+    def _format_llm_usage_lines(self, usage: list[LLMUsageSummary]) -> list[str]:
+        lines: list[str] = []
+        for item in usage:
+            call_label = "call" if item.calls == 1 else "calls"
+            lines.append(
+                f"<i>   {self._escape(item.role.title())}: "
+                f"{self._escape(item.provider.title())} / "
+                f"{self._escape(item.model_display)} ({item.calls} {call_label})</i>"
+            )
+        return lines
 
     def _format_defi_movers(self, movers: list[DeFiProtocol]) -> str:
         lines = ["🏦 <b>DEFI MOVERS</b>"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -117,12 +118,18 @@ CREATE TABLE IF NOT EXISTS predictions (
     price_at_prediction REAL NOT NULL,
     outcome_recorded INTEGER NOT NULL DEFAULT 0,
     actual_price_1d REAL,
+    actual_price_3d REAL,
     actual_price_5d REAL,
+    actual_price_7d REAL,
     actual_direction TEXT,
     actual_change_1d_pct REAL,
+    actual_change_3d_pct REAL,
     actual_change_5d_pct REAL,
+    actual_change_7d_pct REAL,
     is_correct_1d INTEGER,
+    is_correct_3d INTEGER,
     is_correct_5d INTEGER,
+    is_correct_7d INTEGER,
     outcome_recorded_at TEXT
 );
 
@@ -236,6 +243,7 @@ class Database:
             async with aiosqlite.connect(self.db_path) as conn:
                 await self._configure_connection(conn, enable_wal=True)
                 await conn.executescript(SCHEMA_SQL)
+                await self._apply_prediction_outcome_migrations(conn)
                 await conn.commit()
 
                 cursor = await conn.execute("SELECT COUNT(*) FROM watchlist WHERE is_active = 1")
@@ -251,6 +259,22 @@ class Database:
                         [*DEFAULT_STOCKS, *DEFAULT_CRYPTO],
                     )
                     await conn.commit()
+
+    async def _apply_prediction_outcome_migrations(self, conn: aiosqlite.Connection) -> None:
+        statements = (
+            "ALTER TABLE predictions ADD COLUMN actual_price_3d REAL",
+            "ALTER TABLE predictions ADD COLUMN actual_change_3d_pct REAL",
+            "ALTER TABLE predictions ADD COLUMN is_correct_3d INTEGER",
+            "ALTER TABLE predictions ADD COLUMN actual_price_7d REAL",
+            "ALTER TABLE predictions ADD COLUMN actual_change_7d_pct REAL",
+            "ALTER TABLE predictions ADD COLUMN is_correct_7d INTEGER",
+        )
+        for statement in statements:
+            try:
+                await conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
 
     async def get_watchlist(self, asset_type: str | None = None) -> list[WatchlistItem]:
         async with aiosqlite.connect(self.db_path) as conn:

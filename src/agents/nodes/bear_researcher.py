@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.agents.providers import LLMRole
+
 
 SYSTEM_PROMPT = """You are a bearish financial researcher.
 Your job is to construct an aggressive, specific bear case for the given asset.
@@ -101,6 +103,7 @@ Construct an aggressive, specific bear case for {symbol}, directly countering th
             system_prompt=_system_prompt(state),
             user_prompt=user_prompt,
             temperature=0.0,
+            role=LLMRole.BEAR,
         )
         result["symbol"] = symbol
         arguments.append(result)

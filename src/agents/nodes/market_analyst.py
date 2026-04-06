@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.agents.providers import LLMRole
+
 
 SYSTEM_PROMPT = """You are a senior market analyst specializing in US tech stocks and crypto.
 You receive today's price data, index performance, and any SEC filings.
@@ -50,6 +52,7 @@ async def market_analyst_node(state: Mapping[str, object], llm: Any) -> dict[str
         system_prompt=_system_prompt(state),
         user_prompt=user_prompt,
         temperature=0.0,
+        role=LLMRole.GENERAL,
     )
     return {
         "market_report": result,

@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from src.agents.providers import LLMRole
+
 
 SYSTEM_PROMPT = """You are a financial sentiment analyst.
 You receive news headlines with FinBERT sentiment scores (range -1 to +1).
@@ -57,6 +59,7 @@ async def sentiment_analyst_node(state: Mapping[str, object], llm: Any) -> dict[
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,
         temperature=0.0,
+        role=LLMRole.GENERAL,
     )
     return {
         "sentiment_report": result,
