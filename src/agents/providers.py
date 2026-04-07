@@ -3,8 +3,10 @@ Multi-provider LLM client with automatic fallback.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -17,6 +19,9 @@ GROQ_QWEN_MODEL = "qwen/qwen3-32b"
 GROQ_LLAMA_MODEL = "llama-3.3-70b-versatile"
 GEMINI_PRO_MODEL = "gemini-2.5-pro"
 GEMINI_FLASH_MODEL = "gemini-2.5-flash"
+GROQ_REQUESTS_PER_MINUTE = 25
+GROQ_MIN_INTERVAL_SECONDS = 2.2
+GEMINI_REQUESTS_PER_MINUTE = 4
 
 
 class LLMRole(Enum):
@@ -72,8 +77,10 @@ class MultiProviderLLM:
         self._gemini_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
         self._groq_available = bool(self._groq_key)
         self._gemini_available = bool(self._gemini_key)
-        self._groq_limiter = AsyncLimiter(max_rate=55, time_period=60)
-        self._gemini_limiter = AsyncLimiter(max_rate=4, time_period=60)
+        self._groq_limiter = AsyncLimiter(max_rate=GROQ_REQUESTS_PER_MINUTE, time_period=60)
+        self._groq_request_lock = asyncio.Lock()
+        self._groq_next_request_at = 0.0
+        self._gemini_limiter = AsyncLimiter(max_rate=GEMINI_REQUESTS_PER_MINUTE, time_period=60)
 
         if self._gemini_available:
             logger.info("Gemini configured for judge/reflection routing")
@@ -122,6 +129,12 @@ class MultiProviderLLM:
                 ("gemini", GEMINI_PRO_MODEL),
                 ("groq", GROQ_QWEN_MODEL),
                 ("groq", GROQ_LLAMA_MODEL),
+            ]
+        elif role == LLMRole.PLAYBOOK:
+            chain = [
+                ("groq", GROQ_LLAMA_MODEL),
+                ("gemini", GEMINI_FLASH_MODEL),
+                ("groq", GROQ_QWEN_MODEL),
             ]
         else:
             chain = [
@@ -193,6 +206,7 @@ class MultiProviderLLM:
             payload["reasoning_format"] = "hidden"
 
         async with self._groq_limiter:
+            await self._wait_for_groq_slot()
             async with httpx.AsyncClient(timeout=60.0) as client:
                 try:
                     response = await client.post(
@@ -222,6 +236,14 @@ class MultiProviderLLM:
             tokens_used=int(data.get("usage", {}).get("total_tokens", 0) or 0),
             role=role,
         )
+
+    async def _wait_for_groq_slot(self) -> None:
+        async with self._groq_request_lock:
+            now = time.monotonic()
+            wait_seconds = self._groq_next_request_at - now
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            self._groq_next_request_at = time.monotonic() + GROQ_MIN_INTERVAL_SECONDS
 
     async def _call_gemini(
         self,

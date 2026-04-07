@@ -5,6 +5,7 @@ import pytest
 from src.agents.providers import (
     GEMINI_FLASH_MODEL,
     GEMINI_PRO_MODEL,
+    GROQ_LLAMA_MODEL,
     GROQ_QWEN_MODEL,
     LLMResponse,
     LLMRole,
@@ -106,6 +107,74 @@ async def test_general_role_uses_gemini_flash_when_groq_missing(monkeypatch: pyt
     assert response.provider == "gemini"
     assert response.model == GEMINI_FLASH_MODEL
     assert calls == [GEMINI_FLASH_MODEL]
+
+
+@pytest.mark.asyncio
+async def test_playbook_role_prefers_llama_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = MultiProviderLLM(groq_api_key="groq-test", gemini_api_key="gemini-test")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_groq(**kwargs: object) -> LLMResponse:
+        calls.append(("groq", str(kwargs["model"])))
+        return LLMResponse(
+            text="playbook",
+            model=str(kwargs["model"]),
+            provider="groq",
+            tokens_used=64,
+            role=LLMRole.PLAYBOOK,
+        )
+
+    async def fail_gemini(**kwargs: object) -> LLMResponse:
+        raise AssertionError(f"Gemini should not be called: {kwargs}")
+
+    monkeypatch.setattr(provider, "_call_groq", fake_groq)
+    monkeypatch.setattr(provider, "_call_gemini", fail_gemini)
+
+    response = await provider.complete(
+        role=LLMRole.PLAYBOOK,
+        system_prompt="system",
+        user_prompt="user",
+    )
+
+    assert response.provider == "groq"
+    assert response.model == GROQ_LLAMA_MODEL
+    assert calls == [("groq", GROQ_LLAMA_MODEL)]
+
+
+@pytest.mark.asyncio
+async def test_playbook_role_falls_back_from_llama_to_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = MultiProviderLLM(groq_api_key="groq-test", gemini_api_key="gemini-test")
+    calls: list[tuple[str, str]] = []
+
+    async def fail_groq(**kwargs: object) -> LLMResponse:
+        calls.append(("groq", str(kwargs["model"])))
+        raise RuntimeError("Groq unavailable")
+
+    async def fake_gemini(**kwargs: object) -> LLMResponse:
+        calls.append(("gemini", str(kwargs["model"])))
+        return LLMResponse(
+            text="playbook",
+            model=str(kwargs["model"]),
+            provider="gemini",
+            tokens_used=32,
+            role=LLMRole.PLAYBOOK,
+        )
+
+    monkeypatch.setattr(provider, "_call_groq", fail_groq)
+    monkeypatch.setattr(provider, "_call_gemini", fake_gemini)
+
+    response = await provider.complete(
+        role=LLMRole.PLAYBOOK,
+        system_prompt="system",
+        user_prompt="user",
+    )
+
+    assert response.provider == "gemini"
+    assert response.model == GEMINI_FLASH_MODEL
+    assert calls == [
+        ("groq", GROQ_LLAMA_MODEL),
+        ("gemini", GEMINI_FLASH_MODEL),
+    ]
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from src.agents.graph import AgentPipeline
     from src.agents.llm import GeminiClient
     from src.agents.state import AgentAnalysis, LLMUsageSummary
+    from src.ta.signals import TASignal
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -81,6 +82,8 @@ SIGNAL_CONTEXT_PROXIES = ("SPY", "QQQ", "VIXY")
 CRYPTO_SYMBOL_ALIASES = {
     "RENDER": "RNDR",
 }
+PLAYBOOK_MAX_HEADLINE_CHARS = 160
+PLAYBOOK_MAX_TA_SUMMARY_CHARS = 120
 
 PLAYBOOK_SYSTEM_PROMPT = """You are a financial analyst writing a daily playbook for someone
 who is not a trader and does not know technical jargon.
@@ -1231,40 +1234,10 @@ class DataAggregator:
         if llm is None:
             raise RuntimeError("No LLM provider is available")
 
-        asset_blocks: list[str] = []
-        for asset in notable_assets:
-            asset_blocks.append(
-                "\n".join(
-                    [
-                        f"{asset['symbol']} ({asset['asset_type']}):",
-                        f"  Price: {asset['price_text']}",
-                        f"  Consensus bias: {asset['consensus_bias']}",
-                        f"  Agent verdict: {asset['agent_view']} ({asset['agent_confidence_text']})",
-                        f"  24h change: {asset['change_24h_pct']:+.1f}%",
-                        f"  7d change: {asset['change_7d_text']}",
-                        f"  Sentiment: {asset['sentiment_label']} ({asset['sentiment_score_text']})",
-                        f"  Event: {asset['event_type']} (confidence: {asset['event_confidence_text']})",
-                        f"  Historical CAR: {asset['expected_car_text']} over {asset['expected_car_window']}",
-                        f"  Remaining drift: {asset['remaining_drift_text']}",
-                        f"  Latest headline: {asset['headline']}",
-                        "  --- Technical Analysis ---",
-                        f"  RSI(14): {asset['rsi_value_text']} ({asset['rsi_signal']})",
-                        f"  MACD: {asset['macd_signal']} (histogram: {asset['macd_histogram_text']})",
-                        f"  Bollinger: {asset['bb_position']} {asset['bb_squeeze_text']}".rstrip(),
-                        f"  Trend: {asset['trend']} (EMA20 vs EMA50)",
-                        f"  ATR: {asset['atr_pct_text']} ({asset['volatility']})",
-                        f"  TA Signal: {asset['ta_overall']} ({asset['ta_confidence_text']})",
-                        "  --- Correlation Context ---",
-                        f"  Pair correlation: {asset['pair_label']} 20d={asset['pair_corr_20d_text']} 60d={asset['pair_corr_60d_text']}",
-                        f"  Pair regime: {asset['pair_regime']}",
-                        f"  BTC-QQQ 20d corr: {asset['btc_qqq_corr_text']}",
-                        f"  Regime: {asset['regime']}",
-                        "  --- Composite Score ---",
-                        f"  Score: {asset['composite_score_text']} ({asset['composite_direction']})",
-                        f"  Signal agreement: {asset['signal_agreement_text']}",
-                    ]
-                )
-            )
+        asset_blocks = [
+            self._build_playbook_asset_block(asset, briefing_data)
+            for asset in notable_assets
+        ]
 
         user_prompt = (
             "Create a daily playbook for these assets:\n\n"
@@ -1286,6 +1259,47 @@ class DataAggregator:
         playbook_text = response.strip()
         await self._log_playbook_predictions(playbook_text, notable_assets)
         return playbook_text, 1, duration, llm_usage
+
+    def _build_playbook_asset_block(
+        self,
+        asset: dict[str, object],
+        briefing_data: BriefingData,
+    ) -> str:
+        symbol = str(asset.get("symbol", "")).upper()
+        ta_signal = briefing_data.ta_signals.get(symbol)
+        headline = self._truncate_playbook_field(asset.get("headline"), PLAYBOOK_MAX_HEADLINE_CHARS)
+        ta_summary = self._truncate_playbook_field(
+            ta_signal.summary if ta_signal is not None else "N/A",
+            PLAYBOOK_MAX_TA_SUMMARY_CHARS,
+        )
+        agent_view = str(asset.get("agent_view", "N/A"))
+        agent_text = (
+            agent_view
+            if agent_view == "N/A"
+            else f"{agent_view} ({asset.get('agent_confidence_text', 'N/A')})"
+        )
+
+        context_parts = [f"Regime={asset.get('regime', 'N/A')}"]
+        pair_label = str(asset.get("pair_label", "N/A"))
+        pair_regime = str(asset.get("pair_regime", "N/A"))
+        if pair_label != "N/A" or pair_regime != "N/A":
+            context_parts.append(f"Pair={pair_label} {pair_regime}".strip())
+        btc_qqq_corr = str(asset.get("btc_qqq_corr_text", "N/A"))
+        if btc_qqq_corr != "N/A":
+            context_parts.append(f"BTC-QQQ corr={btc_qqq_corr}")
+
+        return "\n".join(
+            [
+                f"{asset['symbol']} ({asset['asset_type']})",
+                f"Price: {asset['price_text']} | 24h: {asset['change_24h_pct']:+.1f}% | 7d: {asset['change_7d_text']}",
+                f"Consensus: {asset['consensus_bias']} | Agent: {agent_text} | Sentiment: {asset['sentiment_label']} ({asset['sentiment_score_text']})",
+                f"Headline: {headline}",
+                f"Event: {self._playbook_event_summary(asset)}",
+                f"Signals: {ta_summary}",
+                f"Levels: {self._playbook_levels_summary(ta_signal)}",
+                f"Context: {' | '.join(context_parts)}",
+            ]
+        )
 
     def _notable_assets_for_playbook(self, briefing_data: BriefingData) -> list[dict[str, object]]:
         latest_news_by_symbol: dict[str, NewsItem] = {}
@@ -1460,6 +1474,53 @@ class DataAggregator:
 
         notable_assets.sort(key=lambda asset: cast(tuple[float, float, float], asset["sort_key"]), reverse=True)
         return notable_assets
+
+    @staticmethod
+    def _truncate_playbook_field(value: object, limit: int) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return "N/A"
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3].rstrip()}..."
+
+    @staticmethod
+    def _playbook_event_summary(asset: dict[str, object]) -> str:
+        event_type = str(asset.get("event_type", "none"))
+        if event_type == "none":
+            return "none"
+
+        parts = [f"{event_type} ({asset.get('event_confidence_text', 'N/A')})"]
+        expected_car = str(asset.get("expected_car_text", "N/A"))
+        expected_window = str(asset.get("expected_car_window", "N/A"))
+        if expected_car != "N/A" and expected_window != "N/A":
+            parts.append(f"hist {expected_car} over {expected_window}")
+        remaining = str(asset.get("remaining_drift_text", "N/A"))
+        if remaining != "N/A":
+            parts.append(f"remaining {remaining}")
+        return " | ".join(parts)
+
+    @classmethod
+    def _playbook_levels_summary(cls, ta_signal: TASignal | None) -> str:
+        if ta_signal is None:
+            return "current price only"
+
+        parts = [
+            f"support ~{cls._playbook_price_level(ta_signal.bb_lower)}",
+            f"EMA20 ~{cls._playbook_price_level(ta_signal.ema_20)}",
+            f"resistance ~{cls._playbook_price_level(ta_signal.bb_upper)}",
+        ]
+        return ", ".join(parts)
+
+    @staticmethod
+    def _playbook_price_level(value: float | None) -> str:
+        if value is None:
+            return "N/A"
+        if value >= 1_000:
+            return f"${value:,.0f}"
+        if value >= 1:
+            return f"${value:,.2f}"
+        return f"${value:.4g}"
 
     @staticmethod
     def _playbook_pct_text(value: float | None) -> str:
