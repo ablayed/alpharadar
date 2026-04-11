@@ -58,6 +58,43 @@ def role_display_name(role: str) -> str:
     return ROLE_DISPLAY_NAMES.get(role, role.replace("_", " ").title())
 
 
+def parse_llm_json(text: str) -> Any | None:
+    """Parse JSON from LLM output, tolerating fences, traces, and wrapper text."""
+    if not text or text.strip().lower() in {"", "none", "null"}:
+        return None
+
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    start_positions = sorted(
+        pos for pos in (cleaned.find("{"), cleaned.find("[")) if pos != -1
+    )
+    for start in start_positions:
+        try:
+            parsed, _ = decoder.raw_decode(cleaned[start:])
+            return parsed
+        except json.JSONDecodeError:
+            continue
+
+    for char in ("{", "["):
+        start = cleaned.find(char)
+        while start != -1:
+            try:
+                parsed, _ = decoder.raw_decode(cleaned[start:])
+                return parsed
+            except json.JSONDecodeError:
+                start = cleaned.find(char, start + 1)
+
+    return None
+
+
 class AgentLLM:
     """Compatibility wrapper over the multi-provider router."""
 
@@ -152,6 +189,10 @@ class AgentLLM:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        if not response.text or response.text.strip().lower() in {"", "none", "null"}:
+            raise RuntimeError(
+                f"Empty response from {response.provider}/{response.model} for role={role.value}"
+            )
         self._history.append(response)
         AgentLLM._usage_log.append(response)
         self._call_count += 1
@@ -183,13 +224,8 @@ class AgentLLM:
             max_tokens=max_tokens,
             role=role,
         )
-
-        cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError:
+        parsed = parse_llm_json(text)
+        if parsed is None:
             logger.warning("Failed to parse JSON response: %s", text[:200])
             return {"raw": text}
 

@@ -192,7 +192,7 @@ async def test_playbook_role_prefers_openrouter_reasoning_model(
 
 
 @pytest.mark.asyncio
-async def test_bull_role_falls_back_from_r1_to_v32(
+async def test_bull_role_prefers_v32_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = MultiProviderLLM(groq_api_key="groq-test", openrouter_api_key="or-test")
@@ -225,9 +225,52 @@ async def test_bull_role_falls_back_from_r1_to_v32(
 
     assert response.provider == "openrouter"
     assert response.model == OPENROUTER_GENERAL_MODEL
+    assert calls == [("openrouter", OPENROUTER_GENERAL_MODEL)]
+
+
+@pytest.mark.asyncio
+async def test_bull_role_falls_back_to_groq_when_v32_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MultiProviderLLM(groq_api_key="groq-test", openrouter_api_key="or-test")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_openrouter(**kwargs: object) -> LLMResponse:
+        model = str(kwargs["model"])
+        calls.append(("openrouter", model))
+        return LLMResponse(
+            text="None",
+            model=model,
+            provider="openrouter",
+            tokens_used=0,
+            role=LLMRole.BULL,
+        )
+
+    async def fake_groq(**kwargs: object) -> LLMResponse:
+        model = str(kwargs["model"])
+        calls.append(("groq", model))
+        return LLMResponse(
+            text="fallback",
+            model=model,
+            provider="groq",
+            tokens_used=12,
+            role=LLMRole.BULL,
+        )
+
+    monkeypatch.setattr(provider, "_call_openrouter", fake_openrouter)
+    monkeypatch.setattr(provider, "_call_groq", fake_groq)
+
+    response = await provider.complete(
+        role=LLMRole.BULL,
+        system_prompt="system",
+        user_prompt="user",
+    )
+
+    assert response.provider == "groq"
+    assert response.model == GROQ_QWEN_MODEL
     assert calls == [
-        ("openrouter", OPENROUTER_REASONING_MODEL),
         ("openrouter", OPENROUTER_GENERAL_MODEL),
+        ("groq", GROQ_QWEN_MODEL),
     ]
 
 

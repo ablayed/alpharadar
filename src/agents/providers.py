@@ -68,14 +68,14 @@ ROLE_CHAINS: dict[LLMRole, list[tuple[str, str]]] = {
         ("groq", GROQ_LLAMA_MODEL),
     ],
     LLMRole.BULL: [
-        ("openrouter", OPENROUTER_REASONING_MODEL),
         ("openrouter", OPENROUTER_GENERAL_MODEL),
         ("groq", GROQ_QWEN_MODEL),
+        ("groq", GROQ_LLAMA_MODEL),
     ],
     LLMRole.BEAR: [
-        ("openrouter", OPENROUTER_REASONING_MODEL),
         ("openrouter", OPENROUTER_GENERAL_MODEL),
         ("groq", GROQ_QWEN_MODEL),
+        ("groq", GROQ_LLAMA_MODEL),
     ],
     LLMRole.PLAYBOOK: [
         ("openrouter", OPENROUTER_REASONING_MODEL),
@@ -151,6 +151,10 @@ def _strip_reasoning_traces(model: str, text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def _is_empty_response_text(text: str) -> bool:
+    return not text or text.strip().lower() in {"", "none", "null"}
+
+
 class MultiProviderLLM:
     """Route LLM calls to the best provider for each role and fall back on failure."""
 
@@ -221,7 +225,7 @@ class MultiProviderLLM:
 
             try:
                 if provider == "openrouter":
-                    return await self._call_openrouter(
+                    response = await self._call_openrouter(
                         role=role,
                         model=model,
                         system_prompt=system_prompt,
@@ -229,14 +233,19 @@ class MultiProviderLLM:
                         temperature=temperature,
                         max_tokens=max_tokens,
                     )
-                return await self._call_groq(
-                    role=role,
-                    model=model,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                else:
+                    response = await self._call_groq(
+                        role=role,
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+
+                if _is_empty_response_text(response.text):
+                    raise RuntimeError(f"Empty response from {provider}/{model}")
+                return response
             except Exception as exc:
                 last_error = exc
                 logger.warning(
