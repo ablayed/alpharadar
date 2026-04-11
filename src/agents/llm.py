@@ -63,37 +63,50 @@ def parse_llm_json(text: str) -> Any | None:
     if not text or text.strip().lower() in {"", "none", "null"}:
         return None
 
+    # Strip reasoning traces
     cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\n?```\s*$", "", cleaned, flags=re.IGNORECASE).strip()
 
+    # Strip markdown fences (multiple patterns)
+    cleaned = re.sub(r"```(?:json)?\s*\n?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Try direct parse
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
 
-    decoder = json.JSONDecoder()
-    start_positions = sorted(
-        pos for pos in (cleaned.find("{"), cleaned.find("[")) if pos != -1
-    )
-    for start in start_positions:
-        try:
-            parsed, _ = decoder.raw_decode(cleaned[start:])
-            return parsed
-        except json.JSONDecodeError:
-            continue
+    # Extract between first { and last }
+    first_brace = cleaned.find("{")
+    last_brace = cleaned.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        json_str = cleaned[first_brace : last_brace + 1]
 
-    for char in ("{", "["):
-        start = cleaned.find(char)
-        while start != -1:
+        # Fix common LLM JSON issues
+        # Replace literal newlines inside strings with \n
+        json_str = re.sub(r'(?<=: \")(.*?)(?=\"[,\n}])',
+                          lambda m: m.group(0).replace('\n', ' '),
+                          json_str, flags=re.DOTALL)
+        # Remove trailing commas before } or ]
+        json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: raw_decode from first { or [
+    decoder = json.JSONDecoder()
+    for char in ["{", "["]:
+        pos = cleaned.find(char)
+        if pos != -1:
             try:
-                parsed, _ = decoder.raw_decode(cleaned[start:])
+                parsed, _ = decoder.raw_decode(cleaned[pos:])
                 return parsed
             except json.JSONDecodeError:
-                start = cleaned.find(char, start + 1)
+                continue
 
     return None
-
 
 class AgentLLM:
     """Compatibility wrapper over the multi-provider router."""
