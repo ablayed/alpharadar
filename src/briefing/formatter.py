@@ -18,6 +18,14 @@ INDEX_PROXY_NOTES: dict[str, str] = {
 }
 
 
+def _provider_display_name(provider: str) -> str:
+    return {
+        "openrouter": "OpenRouter",
+        "groq": "Groq",
+        "gemini": "Gemini",
+    }.get(provider, provider.replace("_", " ").title())
+
+
 def _sentiment_indicator(news_item: NewsItem) -> str:
     """Return an emoji indicator based on sentiment score and confidence."""
     if news_item.sentiment_label is None or news_item.sentiment_score is None:
@@ -742,7 +750,7 @@ class BriefingFormatter:
             call_label = "call" if item.calls == 1 else "calls"
             lines.append(
                 f"<i>   {self._escape(item.role.title())}: "
-                f"{self._escape(item.provider.title())} / "
+                f"{self._escape(_provider_display_name(item.provider))} / "
                 f"{self._escape(item.model_display)} ({item.calls} {call_label})</i>"
             )
         return lines

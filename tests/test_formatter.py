@@ -219,29 +219,29 @@ def _sample_agent_analysis() -> AgentAnalysis:
         llm_usage=[
             LLMUsageSummary(
                 role="general",
-                provider="groq",
-                model="qwen/qwen3-32b",
-                model_display="Qwen3-32B",
+                provider="openrouter",
+                model="deepseek/deepseek-v3.2",
+                model_display="DeepSeek V3.2",
                 calls=3,
             ),
             LLMUsageSummary(
                 role="bull",
-                provider="groq",
-                model="qwen/qwen3-32b",
-                model_display="Qwen3-32B",
+                provider="openrouter",
+                model="deepseek/deepseek-r1-0528",
+                model_display="DeepSeek R1 0528",
                 calls=1,
             ),
             LLMUsageSummary(
                 role="bear",
-                provider="groq",
-                model="qwen/qwen3-32b",
-                model_display="Qwen3-32B",
+                provider="openrouter",
+                model="deepseek/deepseek-r1-0528",
+                model_display="DeepSeek R1 0528",
                 calls=1,
             ),
             LLMUsageSummary(
                 role="judge",
-                provider="gemini",
-                model="gemini-2.5-pro",
+                provider="openrouter",
+                model="google/gemini-2.5-pro-preview",
                 model_display="Gemini 2.5 Pro",
                 calls=1,
             ),
@@ -317,8 +317,8 @@ def test_format_daily_includes_ai_deep_dive_when_present() -> None:
     assert "<b>Risk:</b>" in text
     assert "Watch:" in text
     assert "Pipeline: 6 LLM calls in 12.3s" in text
-    assert "General: Groq / Qwen3-32B (3 calls)" in text
-    assert "Judge: Gemini / Gemini 2.5 Pro (1 call)" in text
+    assert "General: OpenRouter / DeepSeek V3.2 (3 calls)" in text
+    assert "Judge: OpenRouter / Gemini 2.5 Pro (1 call)" in text
 
 
 def test_format_daily_simplifies_market_regime_section() -> None:

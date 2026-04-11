@@ -10,10 +10,11 @@ from collections import OrderedDict
 from typing import Any
 
 from src.agents.providers import (
-    GEMINI_FLASH_MODEL,
-    GEMINI_PRO_MODEL,
     GROQ_LLAMA_MODEL,
     GROQ_QWEN_MODEL,
+    OPENROUTER_GENERAL_MODEL,
+    OPENROUTER_JUDGE_MODEL,
+    OPENROUTER_REASONING_MODEL,
     LLMResponse,
     LLMRole,
     get_provider,
@@ -23,10 +24,16 @@ from src.agents.state import LLMUsageSummary
 logger = logging.getLogger(__name__)
 
 MODEL_DISPLAY_NAMES = {
+    OPENROUTER_JUDGE_MODEL: "Gemini 2.5 Pro",
+    OPENROUTER_REASONING_MODEL: "DeepSeek R1 0528",
+    OPENROUTER_GENERAL_MODEL: "DeepSeek V3.2",
     GROQ_QWEN_MODEL: "Qwen3-32B",
     GROQ_LLAMA_MODEL: "Llama 3.3 70B",
-    GEMINI_PRO_MODEL: "Gemini 2.5 Pro",
-    GEMINI_FLASH_MODEL: "Gemini 2.5 Flash",
+}
+
+PROVIDER_DISPLAY_NAMES = {
+    "openrouter": "OpenRouter",
+    "groq": "Groq",
 }
 
 ROLE_DISPLAY_NAMES = {
@@ -43,6 +50,10 @@ def model_display_name(model: str) -> str:
     return MODEL_DISPLAY_NAMES.get(model, model)
 
 
+def provider_display_name(provider: str) -> str:
+    return PROVIDER_DISPLAY_NAMES.get(provider, provider.replace("_", " ").title())
+
+
 def role_display_name(role: str) -> str:
     return ROLE_DISPLAY_NAMES.get(role, role.replace("_", " ").title())
 
@@ -50,11 +61,37 @@ def role_display_name(role: str) -> str:
 class AgentLLM:
     """Compatibility wrapper over the multi-provider router."""
 
+    _usage_log: list[LLMResponse] = []
+
     def __init__(self) -> None:
         self._provider = get_provider()
         self._initialized = False
         self._call_count = 0
         self._history: list[LLMResponse] = []
+
+    @classmethod
+    def reset_usage(cls) -> None:
+        AgentLLM._usage_log = []
+
+    @classmethod
+    def get_usage_summary(cls) -> str:
+        if not AgentLLM._usage_log:
+            return ""
+
+        grouped: OrderedDict[tuple[str, str, str], int] = OrderedDict()
+        for record in AgentLLM._usage_log:
+            key = (
+                role_display_name(record.role.value),
+                provider_display_name(record.provider),
+                model_display_name(record.model),
+            )
+            grouped[key] = grouped.get(key, 0) + 1
+
+        lines: list[str] = []
+        for (role_name, provider_name, model_name), count in grouped.items():
+            call_label = "call" if count == 1 else "calls"
+            lines.append(f"   {role_name}: {provider_name} / {model_name} ({count} {call_label})")
+        return "\n".join(lines)
 
     async def initialize(self) -> None:
         if not self._provider.has_available_provider():
@@ -62,9 +99,9 @@ class AgentLLM:
         self._initialized = True
         status = self._provider.provider_status()
         logger.info(
-            "LLM client initialized (groq=%s, gemini=%s)",
+            "LLM client initialized (openrouter=%s, groq=%s)",
+            status["openrouter"]["configured"],
             status["groq"]["configured"],
-            status["gemini"]["configured"],
         )
 
     @property
@@ -106,7 +143,7 @@ class AgentLLM:
         role: LLMRole = LLMRole.GENERAL,
     ) -> str:
         if not self._initialized:
-            raise RuntimeError("GeminiClient is not initialized")
+            raise RuntimeError("AgentLLM is not initialized")
 
         response = await self._provider.complete(
             role=role,
@@ -116,6 +153,7 @@ class AgentLLM:
             max_tokens=max_tokens,
         )
         self._history.append(response)
+        AgentLLM._usage_log.append(response)
         self._call_count += 1
         logger.info(
             "LLM call succeeded: role=%s provider=%s model=%s tokens=%d",
@@ -166,7 +204,7 @@ class AgentLLM:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.7,
-            max_tokens=1500,
+            max_tokens=2000,
             role=LLMRole.BULL,
         )
 
@@ -175,7 +213,7 @@ class AgentLLM:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.7,
-            max_tokens=1500,
+            max_tokens=2000,
             role=LLMRole.BEAR,
         )
 
@@ -184,7 +222,7 @@ class AgentLLM:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=2500,
             role=LLMRole.JUDGE,
         )
 
@@ -202,8 +240,17 @@ class AgentLLM:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.3,
-            max_tokens=2000,
+            max_tokens=2500,
             role=LLMRole.REFLECTION,
+        )
+
+    async def call_general(self, system_prompt: str, user_prompt: str) -> str:
+        return await self.generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.3,
+            max_tokens=1000,
+            role=LLMRole.GENERAL,
         )
 
 
@@ -211,4 +258,3 @@ class GeminiClient(AgentLLM):
     """
     Backward-compatible name for the shared agent LLM wrapper.
     """
-

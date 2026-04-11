@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     finnhub_api_key: SecretStr
     coingecko_api_key: SecretStr
     groq_api_key: SecretStr | None = None
+    openrouter_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
 
     briefing_hour: int = 7
@@ -31,10 +32,24 @@ class Settings(BaseSettings):
     coingecko_monthly_limit: int = 10_000
     coingecko_warning_threshold: float = 0.8
 
+    @staticmethod
+    def _configured_secret(secret: SecretStr | None) -> SecretStr | None:
+        if secret is None:
+            return None
+        return secret if secret.get_secret_value().strip() else None
+
+    @property
+    def has_groq_api_key(self) -> bool:
+        return self._configured_secret(self.groq_api_key) is not None
+
+    @property
+    def has_openrouter_api_key(self) -> bool:
+        return self._configured_secret(self.openrouter_api_key) is not None
+
     @property
     def llm_api_key(self) -> SecretStr | None:
-        """Prefer the current Groq key name, but keep GEMINI_API_KEY as a fallback."""
-        return self.groq_api_key or self.gemini_api_key
+        """Return the first configured multi-provider key."""
+        return self._configured_secret(self.openrouter_api_key) or self._configured_secret(self.groq_api_key)
 
 
 settings = Settings()  # type: ignore[call-arg]

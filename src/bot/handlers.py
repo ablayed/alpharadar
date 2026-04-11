@@ -11,6 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.alerts import AlertPipeline, AlertSeverity
+from src.agents.providers import get_provider
 from src.agents.state import AgentAnalysis, DebateVerdict, LLMUsageSummary
 from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
@@ -1402,6 +1403,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     agent_status = aggregator.agent_pipeline_status_text()
     llm_status = aggregator.llm_provider_status()
+    provider = get_provider()
+    credit = await provider.get_openrouter_credit()
+    credit_text = f"${credit:.2f} remaining" if credit is not None else "unknown"
     correlation_pair_count = _correlation_pair_count(bot_data)
     ws_state = _websocket_status_text(context)
     uptime = _uptime_text(context)
@@ -1427,8 +1431,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "<b>ANALYSIS ENGINE</b>",
         _format_subsystem_line("FinBERT sentiment (ONNX)", aggregator.sentiment_analyzer.is_available()),
         _format_agent_pipeline_line(agent_status),
-        _format_subsystem_line("Groq (Qwen3-32B + Llama fallback)", llm_status.get("groq")),
-        _format_subsystem_line("Gemini (2.5 Pro + Flash fallback)", llm_status.get("gemini")),
         _format_subsystem_line("Technical analysis (14 indicators)", True),
         _format_subsystem_line("SMC detection (FVG + BOS + Order Blocks)", True),
         _format_subsystem_line(
@@ -1436,6 +1438,17 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             True if correlation_pair_count > 0 else None,
         ),
         f"\U0001F4C8 Regime detection: {html.escape(regime_text, quote=False)}",
+        "",
+        "<b>LLM PROVIDERS</b>",
+        f"OpenRouter: {html.escape(credit_text, quote=False)}",
+        "  Judge/Reflection: Gemini 2.5 Pro",
+        "  Bull/Bear/Playbook: DeepSeek R1 0528",
+        "  General: DeepSeek V3.2",
+        (
+            "Groq: fallback (Qwen3-32B + Llama 3.3 70B)"
+            if llm_status.get("groq")
+            else "Groq: not configured"
+        ),
         "",
         "<b>ML ENSEMBLE</b>",
         ml_section,
@@ -2596,11 +2609,19 @@ def _format_playbook_message(
             call_label = "call" if usage.calls == 1 else "calls"
             lines.append(
                 f"<i>   {html.escape(usage.role.title(), quote=False)}: "
-                f"{html.escape(usage.provider.title(), quote=False)} / "
+                f"{html.escape(_provider_display_name(usage.provider), quote=False)} / "
                 f"{html.escape(usage.model_display, quote=False)} ({usage.calls} {call_label})</i>"
             )
         footer = "\n".join(lines)
     return "\n\n".join(part for part in [header, body, footer] if part)
+
+
+def _provider_display_name(provider: str) -> str:
+    return {
+        "openrouter": "OpenRouter",
+        "groq": "Groq",
+        "gemini": "Gemini",
+    }.get(provider, provider.replace("_", " ").title())
 
 
 def _format_trade_text(signal: TradeSignal) -> str:

@@ -158,9 +158,9 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
 
     init_provider(
         groq_key=(settings.groq_api_key.get_secret_value() if settings.groq_api_key is not None else None),
-        gemini_key=(
-            settings.gemini_api_key.get_secret_value()
-            if settings.gemini_api_key is not None
+        openrouter_key=(
+            settings.openrouter_api_key.get_secret_value()
+            if settings.openrouter_api_key is not None
             else None
         ),
     )

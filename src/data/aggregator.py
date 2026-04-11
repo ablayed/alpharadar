@@ -71,7 +71,7 @@ from src.ta.signals import TASignal, compute_signals
 
 if TYPE_CHECKING:
     from src.agents.graph import AgentPipeline
-    from src.agents.llm import GeminiClient
+    from src.agents.llm import AgentLLM
     from src.agents.state import AgentAnalysis, LLMUsageSummary
     from src.ta.signals import TASignal
 
@@ -145,7 +145,7 @@ class DataAggregator:
         self.reflection_evaluator = ReflectionEvaluator(settings.db_path)
         self.correlation_engine = CorrelationEngine()
         self.current_regime: RegimeState | None = None
-        self._gemini_client: GeminiClient | None = None
+        self._llm_client: AgentLLM | None = None
         self._agent_pipeline: AgentPipeline | None = None
         self._agent_pipeline_init_error: str | None = None
 
@@ -743,15 +743,15 @@ class DataAggregator:
 
     def agent_pipeline_status_text(self) -> str:
         if self.settings.llm_api_key is None:
-            return "No GROQ_API_KEY or GEMINI_API_KEY set"
+            return "No OPENROUTER_API_KEY or GROQ_API_KEY set"
         llm_status = self.llm_provider_status()
         if self._agent_pipeline is not None:
-            if llm_status["groq"] and llm_status["gemini"]:
-                return "Ready | Groq Qwen3-32B primary, Gemini 2.5 Pro for judge/reflection"
+            if llm_status["openrouter"] and llm_status["groq"]:
+                return "Ready | OpenRouter primary with Groq fallback"
+            if llm_status["openrouter"]:
+                return "Ready | OpenRouter only"
             if llm_status["groq"]:
-                return "Ready | Groq Qwen3-32B primary with Llama 3.3 fallback"
-            if llm_status["gemini"]:
-                return "Ready | Gemini-only fallback mode"
+                return "Ready | Groq-only fallback mode"
             return "Ready"
         if self._agent_pipeline_init_error is not None:
             return "Configured but unavailable"
@@ -759,8 +759,8 @@ class DataAggregator:
 
     def llm_provider_status(self) -> dict[str, bool]:
         return {
-            "groq": self.settings.groq_api_key is not None,
-            "gemini": self.settings.gemini_api_key is not None,
+            "openrouter": self.settings.has_openrouter_api_key,
+            "groq": self.settings.has_groq_api_key,
         }
 
     async def provider_health(self) -> dict[str, bool]:
@@ -1154,7 +1154,7 @@ class DataAggregator:
         if not news_items:
             return news_items, []
 
-        classifier = EventClassifier(db=self.db, gemini_client=self._gemini_client)
+        classifier = EventClassifier(db=self.db, gemini_client=self._llm_client)
         headline_data: list[dict[str, object]] = []
         for item in news_items:
             actual_move = 0.0
@@ -1584,35 +1584,35 @@ class DataAggregator:
 
         try:
             from src.agents.graph import AgentPipeline
-            gemini = await self._ensure_llm_client()
-            if gemini is None:
+            llm_client = await self._ensure_llm_client()
+            if llm_client is None:
                 return None
             self._agent_pipeline = AgentPipeline(
-                gemini_client=gemini,
+                gemini_client=llm_client,
                 ta_signal_fetcher=self.get_ta_signal_payload,
                 lessons_provider=self.get_latest_lessons,
             )
             self._agent_pipeline_init_error = None
         except Exception as exc:
             self._agent_pipeline = None
-            self._gemini_client = None
+            self._llm_client = None
             self._agent_pipeline_init_error = f"{type(exc).__name__}: {exc}"
             logger.exception("Agent pipeline initialization failed; continuing without LLM access")
 
         return self._agent_pipeline
 
-    async def _ensure_llm_client(self) -> GeminiClient | None:
+    async def _ensure_llm_client(self) -> AgentLLM | None:
         if self.settings.llm_api_key is None:
             return None
-        if self._gemini_client is not None:
-            return self._gemini_client
+        if self._llm_client is not None:
+            return self._llm_client
 
-        from src.agents.llm import GeminiClient
+        from src.agents.llm import AgentLLM
 
-        gemini = GeminiClient()
-        await gemini.initialize()
-        self._gemini_client = gemini
-        return gemini
+        llm_client = AgentLLM()
+        await llm_client.initialize()
+        self._llm_client = llm_client
+        return llm_client
 
     async def _coin_id_map(self) -> dict[str, str]:
         watchlist = await self.db.get_watchlist("crypto")
