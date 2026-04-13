@@ -1158,10 +1158,46 @@ async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     evaluator = _reflection_evaluator_from_context(context)
+    logger.info(
+        "Reflect command: evaluator_id=%s db_path=%s",
+        id(evaluator),
+        getattr(evaluator, "_db_path", None),
+    )
     reflection = await evaluator.latest_reflection()
     if reflection is None:
+        row_count: int | None = None
+        latest_created: str | None = None
+        db_path = str(getattr(evaluator, "_db_path", ""))
+        try:
+            async with aiosqlite.connect(db_path) as connection:
+                cursor = await connection.execute(
+                    """
+                    SELECT COUNT(*), MAX(created_at)
+                    FROM reflections
+                    WHERE reflection_type = 'weekly'
+                    """
+                )
+                row = await cursor.fetchone()
+            if row is not None:
+                row_count = int(row[0] or 0)
+                latest_created = str(row[1]) if row[1] is not None else None
+        except Exception:
+            logger.exception("Reflect command debug query failed for db_path=%s", db_path)
+        logger.warning(
+            "Reflect command: latest_reflection returned None db_path=%s row_count=%s latest_created=%s",
+            db_path,
+            row_count,
+            latest_created,
+        )
         await update.message.reply_text("No reflections yet. First one runs Sunday at 8:00 AM UTC.")
         return
+    logger.info(
+        "Reflect command: found reflection id=%s created_at=%s period_start=%s period_end=%s",
+        reflection.id,
+        reflection.created_at,
+        reflection.period_start,
+        reflection.period_end,
+    )
 
     text = (
         "\U0001F9E0 <b>WEEKLY REFLECTION</b>\n"
@@ -1169,6 +1205,11 @@ async def reflect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Predictions: {reflection.total_predictions} | "
         f"Accuracy: {(reflection.accuracy_1d or 0.0):.1f}%\n\n"
         f"{html.escape(reflection.reflection_text, quote=False)}"
+    )
+    logger.info(
+        "Reflect command: sending reflection id=%s text_len=%s",
+        reflection.id,
+        len(text),
     )
     await _send_long_message(context.bot, update.effective_chat.id, text)
 
@@ -2515,9 +2556,21 @@ def _sentiment_analyzer_from_context(context: ContextTypes.DEFAULT_TYPE) -> Sent
 def _reflection_evaluator_from_context(context: ContextTypes.DEFAULT_TYPE) -> ReflectionEvaluator:
     evaluator = context.bot_data.get("reflection_evaluator")
     if isinstance(evaluator, ReflectionEvaluator):
+        logger.info(
+            "Reflect evaluator: using cached evaluator id=%s db_path=%s",
+            id(evaluator),
+            getattr(evaluator, "_db_path", None),
+        )
         return evaluator
     aggregator = _aggregator_from_context(context)
     context.bot_data["reflection_evaluator"] = aggregator.reflection_evaluator
+    db = context.bot_data.get("db")
+    logger.info(
+        "Reflect evaluator: caching aggregator evaluator id=%s eval_db_path=%s db.db_path=%s",
+        id(aggregator.reflection_evaluator),
+        getattr(aggregator.reflection_evaluator, "_db_path", None),
+        getattr(db, "db_path", None),
+    )
     return aggregator.reflection_evaluator
 
 
