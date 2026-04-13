@@ -39,6 +39,9 @@ async def run_weekly_reflection(db_path: str, llm_client: object | None) -> str 
     if llm_client is None:
         logger.info("Weekly reflection skipped: no LLM client available")
         return None
+    initialize = getattr(llm_client, "initialize", None)
+    if callable(initialize) and getattr(llm_client, "_initialized", True) is False:
+        await initialize()
 
     now = datetime.now(UTC)
     week_start = _sqlite_timestamp(now - timedelta(days=7))
