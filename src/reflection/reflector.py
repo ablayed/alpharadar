@@ -124,7 +124,7 @@ Analyze these results and provide the weekly reflection."""
             system_prompt=REFLECTION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.0,
-            max_tokens=800,
+            max_tokens=2500,
             role=LLMRole.REFLECTION,
         )
         reflection_payload = result if isinstance(result, dict) else {"raw": str(result)}
