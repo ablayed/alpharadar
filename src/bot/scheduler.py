@@ -13,6 +13,8 @@ from src.bot.handlers import save_signal_to_log
 from src.bot.messages import _send_long_message
 from src.config import settings
 from src.data.aggregator import DataAggregator
+from src.data.discovery_runner import run_discovery
+from src.data.hot_list import init_hot_list_table
 from src.briefing.models import BriefingData
 from src.events.models import DetectedEvent
 from src.ml import MLEnsemble, train_all_models
@@ -31,6 +33,8 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
             "Job queue is not available. "
             "Install python-telegram-bot with: pip install 'python-telegram-bot[job-queue]'"
         )
+
+    await init_hot_list_table(settings.db_path)
 
     tz = ZoneInfo(settings.timezone)
     chat_id = int(settings.telegram_chat_id)
@@ -100,6 +104,13 @@ async def setup_scheduler(application: Application[Any, Any, Any, Any, Any, Any]
         days=tuple(range(7)),
         name="detect_and_store_regime",
     )
+    for hour in (6, 18):
+        job_queue.run_daily(
+            callback=run_discovery_job,
+            time=datetime.time(hour=hour, minute=30, second=0, tzinfo=ZoneInfo(settings.timezone)),
+            days=tuple(range(7)),
+            name=f"discovery_scan_{hour:02d}",
+        )
     job_queue.run_repeating(
         callback=check_open_positions,
         interval=4 * 3600,
@@ -186,6 +197,38 @@ async def _schedule_trade_scans(application: Application[Any, Any, Any, Any, Any
 
     for hour in (7, 19):
         _schedule_trade_scan_job(job_queue, hour=hour, minute=0)
+
+
+async def run_discovery_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the scheduled discovery scan before the trade scans."""
+    logger.info("Running scheduled discovery scan")
+
+    try:
+        aggregator = context.bot_data.get("aggregator")
+        if not isinstance(aggregator, DataAggregator):
+            logger.error("Discovery scan dependencies missing in bot_data")
+            return
+
+        fixed_watchlist = {
+            item.symbol.upper()
+            for item in await aggregator.db.get_watchlist("crypto")
+        }
+        chat_id: int | str | None = None
+        try:
+            chat_id = int(settings.telegram_chat_id)
+        except ValueError:
+            chat_id = settings.telegram_chat_id
+
+        await run_discovery(
+            db_path=aggregator.db.db_path,
+            coingecko_api_key=aggregator.settings.coingecko_api_key.get_secret_value(),
+            fixed_watchlist=fixed_watchlist,
+            bot=context.bot,
+            chat_id=chat_id,
+        )
+        context.bot_data.pop("latest_briefing_data", None)
+    except Exception:
+        logger.exception("Scheduled discovery scan failed")
 
 
 async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:

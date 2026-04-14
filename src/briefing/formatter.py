@@ -316,7 +316,8 @@ class BriefingFormatter:
             sections.extend(
                 [
                     self._format_week_in_review(data.stock_prices),
-                    self._format_crypto_week(data.crypto_prices),
+                    self._format_crypto_week(data.crypto_prices, data.hot_list),
+                    self._format_hot_list_section(data.hot_list),
                     self._format_ai_deep_dive(data.agent_analysis),
                     self._format_defi_movers(data.defi_movers),
                 ]
@@ -325,7 +326,8 @@ class BriefingFormatter:
             sections.extend(
                 [
                     self._format_stocks_section(data.stock_prices, data.news_items, include_headlines),
-                    self._format_crypto_section(data.crypto_prices),
+                    self._format_crypto_section(data.crypto_prices, data.hot_list),
+                    self._format_hot_list_section(data.hot_list),
                     self._format_ai_deep_dive(data.agent_analysis),
                     self._format_catalysts(data),
                 ]
@@ -465,13 +467,26 @@ class BriefingFormatter:
                         lines.append(annotation)
         return "\n".join(lines)
 
-    def _format_crypto_section(self, crypto_prices: list[AssetPrice]) -> str:
+    def _format_crypto_section(
+        self,
+        crypto_prices: list[AssetPrice],
+        hot_list: list[dict[str, object]] | None = None,
+    ) -> str:
         lines = ["🪙 <b>CRYPTO</b>"]
-        if not crypto_prices:
+        hot_symbols = {
+            str(item.get("symbol", "")).upper()
+            for item in (hot_list or [])
+            if isinstance(item, dict)
+        }
+        filtered_prices = [
+            item for item in crypto_prices
+            if item.symbol.upper() not in hot_symbols
+        ]
+        if not filtered_prices:
             lines.append("No crypto data available.")
             return "\n".join(lines)
 
-        for item in sorted(crypto_prices, key=lambda price: price.change_24h_pct, reverse=True):
+        for item in sorted(filtered_prices, key=lambda price: price.change_24h_pct, reverse=True):
             lines.append(self._format_asset_line(item, asset_type="crypto"))
         return "\n".join(lines)
 
@@ -697,13 +712,26 @@ class BriefingFormatter:
 
         return "\n".join(lines)
 
-    def _format_crypto_week(self, crypto_prices: list[AssetPrice]) -> str:
+    def _format_crypto_week(
+        self,
+        crypto_prices: list[AssetPrice],
+        hot_list: list[dict[str, object]] | None = None,
+    ) -> str:
         lines = ["🏅 <b>CRYPTO WEEK</b>"]
-        if not crypto_prices:
+        hot_symbols = {
+            str(item.get("symbol", "")).upper()
+            for item in (hot_list or [])
+            if isinstance(item, dict)
+        }
+        filtered_prices = [
+            item for item in crypto_prices
+            if item.symbol.upper() not in hot_symbols
+        ]
+        if not filtered_prices:
             lines.append("No crypto data available.")
             return "\n".join(lines)
 
-        ranked = sorted(crypto_prices, key=self._weekly_change_for_ranking, reverse=True)
+        ranked = sorted(filtered_prices, key=self._weekly_change_for_ranking, reverse=True)
         medals = ["🏆", "🥈", "🥉"]
         for idx, item in enumerate(ranked[:5]):
             marker = medals[idx] if idx < len(medals) else (self._indicator(self._weekly_change_for_ranking(item)) or "⚪")
@@ -711,6 +739,24 @@ class BriefingFormatter:
                 f"{marker} <b>{self._escape(item.symbol)}</b> "
                 f"{self._format_pct(self._weekly_change_for_ranking(item))} "
                 f"({self._crypto_week_context(item)})"
+            )
+        return "\n".join(lines)
+
+    def _format_hot_list_section(self, hot_list: list[dict[str, object]]) -> str:
+        if not hot_list:
+            return ""
+
+        lines = [f"🔥 <b>HOT LIST</b> ({len(hot_list)} coin{'s' if len(hot_list) != 1 else ''})"]
+        for coin in hot_list[:5]:
+            symbol = self._escape(str(coin.get("symbol", "")))
+            pct_change = float(coin.get("price_change_24h", 0) or 0)
+            volume = float(coin.get("initial_volume", 0) or 0)
+            score = int(coin.get("signal_score", 0) or 0)
+            trigger = self._escape(str(coin.get("trigger_reason", "")))
+            indicator = "🟢" if pct_change >= 0 else "🔴"
+            lines.append(
+                f"{indicator} <b>{symbol}</b> {pct_change:+.1f}% | "
+                f"Score: {score} | Vol: {self._format_large_currency(volume)} | {trigger}"
             )
         return "\n".join(lines)
 

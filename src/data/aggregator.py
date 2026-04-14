@@ -57,6 +57,7 @@ from src.data.macro import (
     fetch_fear_greed,
 )
 from src.data.market_indices import MarketIndicesFetcher
+from src.data.hot_list import get_active_hot_list
 from src.events.classifier import EventClassifier
 from src.events.models import DetectedEvent
 from src.reflection.evaluator import ReflectionEvaluator
@@ -180,10 +181,37 @@ class DataAggregator:
         symbols = [item.symbol for item in watchlist]
         return await self._fetch_stock_prices(symbols)
 
-    async def fetch_crypto_prices(self) -> list[AssetPrice]:
-        watchlist = await self.db.get_watchlist("crypto")
-        crypto_items = [item for item in watchlist if item.coingecko_id]
+    async def fetch_crypto_prices(self, *, include_hot_list: bool = False) -> list[AssetPrice]:
+        crypto_items = await self._crypto_watchlist_items(include_hot_list=include_hot_list)
         return await self._fetch_crypto_prices(crypto_items)
+
+    async def _crypto_watchlist_items(self, *, include_hot_list: bool) -> list[WatchlistItem]:
+        watchlist = await self.db.get_watchlist("crypto")
+        fixed_items = [item for item in watchlist if item.coingecko_id]
+        if not include_hot_list:
+            return fixed_items
+
+        merged: dict[str, WatchlistItem] = {
+            item.symbol.upper(): item
+            for item in fixed_items
+        }
+        settings_obj = getattr(self, "settings", None)
+        db_path = getattr(settings_obj, "db_path", None)
+        if not db_path:
+            return list(merged.values())
+
+        for coin in await get_active_hot_list(db_path):
+            symbol = str(coin.get("symbol", "") or "").upper()
+            coin_id = str(coin.get("coingecko_id", "") or "")
+            if not symbol or not coin_id or symbol in merged:
+                continue
+            merged[symbol] = WatchlistItem(
+                symbol=symbol,
+                asset_type="crypto",
+                display_name=str(coin.get("name", "") or symbol),
+                coingecko_id=coin_id,
+            )
+        return list(merged.values())
 
     async def get_current_price(self, symbol: str, asset_type: str) -> float | None:
         symbol_upper = symbol.upper()
@@ -786,7 +814,24 @@ class DataAggregator:
 
         watchlist = await self.db.get_watchlist()
         stock_items = [item for item in watchlist if item.asset_type == "stock"]
-        crypto_items = [item for item in watchlist if item.asset_type == "crypto" and item.coingecko_id]
+        fixed_crypto_items = [item for item in watchlist if item.asset_type == "crypto" and item.coingecko_id]
+        hot_list = await get_active_hot_list(self.settings.db_path)
+        crypto_items_by_symbol: dict[str, WatchlistItem] = {
+            item.symbol.upper(): item
+            for item in fixed_crypto_items
+        }
+        for coin in hot_list:
+            symbol = str(coin.get("symbol", "") or "").upper()
+            coin_id = str(coin.get("coingecko_id", "") or "")
+            if not symbol or not coin_id or symbol in crypto_items_by_symbol:
+                continue
+            crypto_items_by_symbol[symbol] = WatchlistItem(
+                symbol=symbol,
+                asset_type="crypto",
+                display_name=str(coin.get("name", "") or symbol),
+                coingecko_id=coin_id,
+            )
+        crypto_items = list(crypto_items_by_symbol.values())
         stock_symbols = [item.symbol for item in stock_items]
 
         market_is_open = False
@@ -1007,6 +1052,7 @@ class DataAggregator:
             tvl_change_24h_pct=tvl_change_24h_pct,
             defi_movers=defi_movers,
             trending_crypto=trending,
+            hot_list=hot_list,
             coingecko_usage=coingecko_usage,
             event_data=event_data,
             ta_signals=ta_signals,
@@ -1615,7 +1661,7 @@ class DataAggregator:
         return llm_client
 
     async def _coin_id_map(self) -> dict[str, str]:
-        watchlist = await self.db.get_watchlist("crypto")
+        watchlist = await self._crypto_watchlist_items(include_hot_list=True)
         coin_map = {
             item.symbol.upper(): item.coingecko_id
             for item in watchlist

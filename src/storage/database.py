@@ -215,6 +215,37 @@ CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome_record
 CREATE INDEX IF NOT EXISTS idx_tradelog_symbol ON trade_log(symbol);
 CREATE INDEX IF NOT EXISTS idx_tradelog_status ON trade_log(status);
 CREATE INDEX IF NOT EXISTS idx_tradelog_created ON trade_log(created_at);
+
+CREATE TABLE IF NOT EXISTS hot_list (
+    symbol TEXT PRIMARY KEY,
+    coingecko_id TEXT,
+    name TEXT,
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    trigger_reason TEXT,
+    initial_price REAL,
+    initial_volume REAL,
+    market_cap REAL,
+    signal_score INTEGER NOT NULL DEFAULT 50,
+    price_change_24h REAL,
+    status TEXT NOT NULL DEFAULT 'active',
+    binance_symbol TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_hot_list_status_score
+ON hot_list(status, signal_score DESC, expires_at);
+
+CREATE TABLE IF NOT EXISTS discovery_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at TEXT NOT NULL DEFAULT (datetime('now')),
+    candidates_scanned INTEGER NOT NULL DEFAULT 0,
+    candidates_safe INTEGER NOT NULL DEFAULT 0,
+    added_count INTEGER NOT NULL DEFAULT 0,
+    expired_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_runs_run_at
+ON discovery_runs(run_at DESC, id DESC);
 """
 
 

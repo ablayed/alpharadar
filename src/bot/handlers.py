@@ -21,6 +21,11 @@ from src.correlation.models import LeadLagResult, PairCorrelation, RegimeState
 from src.config import settings
 from src.data.base import AssetPrice
 from src.data.aggregator import DataAggregator
+from src.data.hot_list import (
+    MAX_SIZE as MAX_HOT_LIST_SIZE,
+    get_active_hot_list,
+    get_latest_discovery_run,
+)
 from src.events.calibration import format_remaining_drift_status
 from src.events.models import DetectedEvent
 from src.ml import MLEnsemble
@@ -125,6 +130,7 @@ def _help_text() -> str:
         "Commands:\n"
         "/briefing  Get a briefing right now\n"
         "/history  Today's biggest crypto moves\n"
+        "/hotlist  View the auto-discovered crypto hot list\n"
         "/watchlist  View your watchlist\n"
         "/add AAPL  Add a stock to watchlist\n"
         "/add btc  Add a crypto to watchlist\n"
@@ -245,6 +251,45 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lines.append(f"{tvl_emoji} DeFi TVL: ${data.total_tvl / 1e9:.1f}B ({tvl_change:+.1f}%)")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def hotlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the current hot list of auto-discovered crypto assets."""
+    if not await owner_only(update, context):
+        return
+    if update.message is None or update.effective_chat is None:
+        return
+
+    hot_coins = await get_active_hot_list(_db_from_context(context).db_path)
+    if not hot_coins:
+        await update.message.reply_text("Hot list is empty. Next discovery scan runs at 6:30 AM and 6:30 PM London.")
+        return
+
+    lines = ["🔥 <b>HOT LIST</b> (auto-discovered crypto momentum)", ""]
+    for coin in hot_coins:
+        added = str(coin.get("added_at", ""))[:10]
+        expires = str(coin.get("expires_at", ""))[:10]
+        pct_change = float(coin.get("price_change_24h", 0) or 0)
+        direction = "🟢" if pct_change >= 0 else "🔴"
+        lines.append(
+            f"{direction} <b>{html.escape(str(coin['symbol']))}</b> "
+            f"| Score: {int(coin.get('signal_score', 0) or 0)}/100 "
+            f"| {pct_change:+.1f}% "
+            f"| Vol: ${float(coin.get('initial_volume', 0) or 0):,.0f}"
+        )
+        lines.append(
+            f"   Added: {html.escape(added)} | Expires: {html.escape(expires)} | "
+            f"{html.escape(str(coin.get('trigger_reason', 'unknown')), quote=False)}"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"Total: {len(hot_coins)} / {MAX_HOT_LIST_SIZE}",
+            "Use /trade <SYMBOL> to analyze any hot-list coin.",
+        ]
+    )
+    await _send_long_message(context.bot, update.effective_chat.id, "\n".join(lines))
 
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -851,8 +896,12 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         data = await _latest_briefing_data(context, include_agent_analysis=True)
         price_item = _price_item_for_symbol(data, symbol)
         if price_item is None:
-            await msg.edit_text(f"\u26A0\uFE0F Could not find price data for {html.escape(symbol)}.")
-            return
+            data = await aggregator.gather_briefing_data(include_agent_analysis=True)
+            _store_latest_briefing(context, data)
+            price_item = _price_item_for_symbol(data, symbol)
+            if price_item is None:
+                await msg.edit_text(f"\u26A0\uFE0F Could not find price data for {html.escape(symbol)}.")
+                return
 
         ta_signal = data.ta_signals.get(symbol)
         if ta_signal is None:
@@ -974,7 +1023,8 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     aggregator = _aggregator_from_context(context)
 
     try:
-        data = await _latest_briefing_data(context, include_agent_analysis=True)
+        data = await aggregator.gather_briefing_data(include_agent_analysis=True)
+        _store_latest_briefing(context, data)
         signals: list[tuple[TradeSignal, AssetPrice]] = []
         regime_key = (
             data.regime_state.regime.value
@@ -1335,6 +1385,8 @@ async def _legacy_status_command(update: Update, context: ContextTypes.DEFAULT_T
 
     crypto_items = await db.get_watchlist("crypto")
     crypto_symbols = sorted({item.symbol.upper() for item in crypto_items})
+    hot_coins = await get_active_hot_list(db.db_path)
+    latest_discovery = await get_latest_discovery_run(db.db_path)
     ml_section, last_trained_text = _format_ml_status_lines(
         bot_data.get("ml_ensemble"),
         crypto_symbols,
@@ -1505,6 +1557,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _format_fear_greed_text(fear_greed),
         _format_dxy_text(dxy),
         _format_btc_dominance_text(btc_dominance),
+        "",
+        "<b>DISCOVERY</b>",
+        "Discovery scan: 6:30 AM + 6:30 PM London",
+        f"📊 Hot list: {len(hot_coins)}/{MAX_HOT_LIST_SIZE} active coins",
+        f"🆕 Last scan: {_discovery_last_run_text(latest_discovery)}",
+        f"📅 Next scan: {_next_discovery_scan_text()}",
         "",
         "<b>TRADING</b>",
         f"\U0001F4CA Active trades: {active_trades}",
@@ -1809,6 +1867,35 @@ def _next_retrain_text(context: ContextTypes.DEFAULT_TYPE) -> str:
         next_run = next_run + timedelta(days=7)
     hour_12 = next_run.hour % 12 or 12
     return f"{next_run:%Y-%m-%d} {hour_12}:{next_run:%M %p} {next_run:%Z}"
+
+
+def _next_discovery_scan_text() -> str:
+    tz = ZoneInfo(settings.timezone)
+    now = datetime.now(tz)
+    candidates = [
+        now.replace(hour=6, minute=30, second=0, microsecond=0),
+        now.replace(hour=18, minute=30, second=0, microsecond=0),
+    ]
+    future_runs = [candidate for candidate in candidates if candidate > now]
+    next_run = future_runs[0] if future_runs else candidates[0] + timedelta(days=1)
+    delta = next_run - now
+    total_minutes = max(int(delta.total_seconds() // 60), 0)
+    hours, minutes = divmod(total_minutes, 60)
+    if hours <= 0:
+        return f"in {minutes}m"
+    return f"in {hours}h {minutes}m"
+
+
+def _discovery_last_run_text(run: dict[str, object] | None) -> str:
+    if not run:
+        return "no scan recorded yet"
+
+    added_count = int(run.get("added_count", 0) or 0)
+    run_at = str(run.get("run_at", "") or "")
+    timestamp = run_at[:16].replace("T", " ")
+    if not timestamp:
+        return f"{added_count} new coin(s)"
+    return f"{added_count} new coin(s) at {html.escape(timestamp)} UTC"
 
 
 def _format_cme_gap_status(cme_gap: object) -> str:

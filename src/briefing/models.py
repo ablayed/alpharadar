@@ -36,8 +36,8 @@ class BriefingData:
     defi_movers: list[DeFiProtocol]
 
     trending_crypto: list[dict[str, object]]
-
     coingecko_usage: tuple[int, int]
+    hot_list: list[dict[str, object]] = field(default_factory=list)
 
     event_data: list[DetectedEvent] = field(default_factory=list)
     ta_signals: dict[str, TASignal] = field(default_factory=dict)

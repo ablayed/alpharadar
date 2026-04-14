@@ -33,6 +33,7 @@ from src.bot.handlers import (
     handle_asset_type_callback,
     help_command,
     history_command,
+    hotlist_command,
     journal_command,
     log_command,
     playbook_command,
@@ -257,6 +258,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("briefing", briefing_command))
     application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(CommandHandler("hotlist", hotlist_command))
     application.add_handler(CommandHandler("analyze", analyze_command))
     application.add_handler(CommandHandler("playbook", playbook_command))
     application.add_handler(CommandHandler("portfolio", portfolio_command))

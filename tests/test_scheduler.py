@@ -88,3 +88,21 @@ async def test_setup_scheduler_registers_outcome_jobs_for_10_and_22_utc() -> Non
     assert all(call["time"].minute == 0 for call in outcome_jobs)
     assert all(getattr(call["time"].tzinfo, "key", None) == "UTC" for call in outcome_jobs)
     assert all(call["days"] == tuple(range(7)) for call in outcome_jobs)
+
+
+@pytest.mark.asyncio
+async def test_setup_scheduler_registers_discovery_scans_for_630_london() -> None:
+    job_queue = _FakeJobQueue()
+    application = SimpleNamespace(job_queue=job_queue)
+
+    await setup_scheduler(application)
+
+    discovery_jobs = [
+        call for call in job_queue.daily_calls
+        if call["name"] in {"discovery_scan_06", "discovery_scan_18"}
+    ]
+
+    assert len(discovery_jobs) == 2
+    assert {call["time"].hour for call in discovery_jobs} == {6, 18}
+    assert all(call["time"].minute == 30 for call in discovery_jobs)
+    assert all(getattr(call["time"].tzinfo, "key", None) == "Europe/London" for call in discovery_jobs)
