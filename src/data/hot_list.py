@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -35,6 +36,10 @@ async def init_hot_list_table(db_path: str) -> None:
                 market_cap REAL,
                 signal_score INTEGER NOT NULL DEFAULT 50,
                 price_change_24h REAL,
+                direction TEXT NOT NULL DEFAULT 'neutral',
+                breakout_description TEXT,
+                signals_firing INTEGER NOT NULL DEFAULT 0,
+                key_level REAL,
                 status TEXT NOT NULL DEFAULT 'active',
                 binance_symbol TEXT
             );
@@ -55,6 +60,7 @@ async def init_hot_list_table(db_path: str) -> None:
                 ON discovery_runs(run_at DESC, id DESC);
             """
         )
+        await _ensure_hot_list_columns(db)
         await db.commit()
 
 
@@ -86,6 +92,10 @@ async def add_to_hot_list(
     trigger_reason: str,
     signal_score: int,
     price_change_24h: float = 0.0,
+    direction: str = "neutral",
+    breakout_description: str | None = None,
+    signals_firing: int = 0,
+    key_level: float | None = None,
     binance_symbol: str | None = None,
     ttl_days: int = DEFAULT_TTL_DAYS,
 ) -> bool:
@@ -123,6 +133,10 @@ async def add_to_hot_list(
                         market_cap = ?,
                         signal_score = ?,
                         price_change_24h = ?,
+                        direction = ?,
+                        breakout_description = ?,
+                        signals_firing = ?,
+                        key_level = ?,
                         status = 'active',
                         binance_symbol = ?
                     WHERE symbol = ?
@@ -137,6 +151,10 @@ async def add_to_hot_list(
                         market_cap,
                         signal_score,
                         price_change_24h,
+                        direction,
+                        breakout_description,
+                        signals_firing,
+                        key_level,
                         binance_symbol,
                         symbol_upper,
                     ),
@@ -200,10 +218,14 @@ async def add_to_hot_list(
                 market_cap,
                 signal_score,
                 price_change_24h,
+                direction,
+                breakout_description,
+                signals_firing,
+                key_level,
                 status,
                 binance_symbol
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 coingecko_id = excluded.coingecko_id,
                 name = excluded.name,
@@ -215,6 +237,10 @@ async def add_to_hot_list(
                 market_cap = excluded.market_cap,
                 signal_score = excluded.signal_score,
                 price_change_24h = excluded.price_change_24h,
+                direction = excluded.direction,
+                breakout_description = excluded.breakout_description,
+                signals_firing = excluded.signals_firing,
+                key_level = excluded.key_level,
                 status = excluded.status,
                 binance_symbol = excluded.binance_symbol
             """,
@@ -230,6 +256,10 @@ async def add_to_hot_list(
                 market_cap,
                 signal_score,
                 price_change_24h,
+                direction,
+                breakout_description,
+                signals_firing,
+                key_level,
                 binance_symbol,
             ),
         )
@@ -242,6 +272,21 @@ async def add_to_hot_list(
         trigger_reason,
     )
     return True
+
+
+async def _ensure_hot_list_columns(db: aiosqlite.Connection) -> None:
+    statements = (
+        "ALTER TABLE hot_list ADD COLUMN direction TEXT NOT NULL DEFAULT 'neutral'",
+        "ALTER TABLE hot_list ADD COLUMN breakout_description TEXT",
+        "ALTER TABLE hot_list ADD COLUMN signals_firing INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE hot_list ADD COLUMN key_level REAL",
+    )
+    for statement in statements:
+        try:
+            await db.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 async def expire_old_entries(db_path: str) -> int:

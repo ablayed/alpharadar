@@ -749,14 +749,19 @@ class BriefingFormatter:
         lines = [f"🔥 <b>HOT LIST</b> ({len(hot_list)} coin{'s' if len(hot_list) != 1 else ''})"]
         for coin in hot_list[:5]:
             symbol = self._escape(str(coin.get("symbol", "")))
-            pct_change = float(coin.get("price_change_24h", 0) or 0)
             volume = float(coin.get("initial_volume", 0) or 0)
             score = int(coin.get("signal_score", 0) or 0)
-            trigger = self._escape(str(coin.get("trigger_reason", "")))
-            indicator = "🟢" if pct_change >= 0 else "🔴"
+            direction = str(coin.get("direction", "neutral") or "neutral")
+            indicator = "🟢" if direction == "long_setup" else "🔴" if direction == "short_setup" else "⚪"
+            label = "long_setup" if direction == "long_setup" else "short_setup" if direction == "short_setup" else "watching"
+            summary = self._escape(
+                str(coin.get("breakout_description", "") or coin.get("trigger_reason", "")),
+                quote=False,
+            )
             lines.append(
-                f"{indicator} <b>{symbol}</b> {pct_change:+.1f}% | "
-                f"Score: {score} | Vol: {self._format_large_currency(volume)} | {trigger}"
+                f"{indicator} <b>{symbol}</b> | {label} | Score: {score} | "
+                f"{int(coin.get('signals_firing', 0) or 0)} signals | "
+                f"Vol: {self._format_large_currency(volume)} | {summary}"
             )
         return "\n".join(lines)
 

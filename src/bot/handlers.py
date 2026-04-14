@@ -265,26 +265,39 @@ async def hotlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("Hot list is empty. Next discovery scan runs at 6:30 AM and 6:30 PM London.")
         return
 
-    lines = ["🔥 <b>HOT LIST</b> (auto-discovered crypto momentum)", ""]
-    for coin in hot_coins:
-        added = str(coin.get("added_at", ""))[:10]
-        expires = str(coin.get("expires_at", ""))[:10]
-        pct_change = float(coin.get("price_change_24h", 0) or 0)
-        direction = "🟢" if pct_change >= 0 else "🔴"
-        lines.append(
-            f"{direction} <b>{html.escape(str(coin['symbol']))}</b> "
-            f"| Score: {int(coin.get('signal_score', 0) or 0)}/100 "
-            f"| {pct_change:+.1f}% "
-            f"| Vol: ${float(coin.get('initial_volume', 0) or 0):,.0f}"
-        )
-        lines.append(
-            f"   Added: {html.escape(added)} | Expires: {html.escape(expires)} | "
-            f"{html.escape(str(coin.get('trigger_reason', 'unknown')), quote=False)}"
-        )
+    lines = ["🔥 <b>HOT LIST</b> (Smart Scored)", ""]
+    groups = (
+        ("🟢 <b>LONG SETUPS</b>", "long_setup", "🟢"),
+        ("🔴 <b>SHORT SETUPS</b>", "short_setup", "🔴"),
+        ("⚪ <b>WATCHING</b>", "neutral", "⚪"),
+    )
+    for heading, direction_key, emoji in groups:
+        subset = [
+            coin
+            for coin in hot_coins
+            if str(coin.get("direction", "neutral") or "neutral") == direction_key
+        ]
+        if not subset:
+            continue
+        lines.append(heading)
+        for coin in subset:
+            added = str(coin.get("added_at", ""))[:10]
+            expires = str(coin.get("expires_at", ""))[:10]
+            summary = str(coin.get("breakout_description", "") or coin.get("trigger_reason", "unknown"))
+            lines.append(
+                f"{emoji} <b>{html.escape(str(coin['symbol']))}</b> "
+                f"| {int(coin.get('signal_score', 0) or 0)}/100 "
+                f"| {int(coin.get('signals_firing', 0) or 0)} signals "
+                f"| {html.escape(summary[:90], quote=False)}"
+            )
+            lines.append(
+                f"   Added: {html.escape(added)} | Expires: {html.escape(expires)} | "
+                f"Vol: ${float(coin.get('initial_volume', 0) or 0):,.0f}"
+            )
+        lines.append("")
 
     lines.extend(
         [
-            "",
             f"Total: {len(hot_coins)} / {MAX_HOT_LIST_SIZE}",
             "Use /trade <SYMBOL> to analyze any hot-list coin.",
         ]

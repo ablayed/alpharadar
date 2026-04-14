@@ -225,6 +225,8 @@ async def run_discovery_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             fixed_watchlist=fixed_watchlist,
             bot=context.bot,
             chat_id=chat_id,
+            ensemble=context.bot_data.get("ml_ensemble"),
+            tracker=context.bot_data.get("tracker"),
         )
         context.bot_data.pop("latest_briefing_data", None)
     except Exception:

@@ -15,6 +15,7 @@ Applies safety filters for:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from urllib.parse import urlencode
 
 import aiosqlite
 import httpx
+
+from src.data.breakout_scorer import score_breakout
+from src.data.taker_ratio import fetch_taker_buy_ratio
 
 logger = logging.getLogger(__name__)
 
@@ -442,54 +446,113 @@ def apply_safety_filters(candidates: list[dict], fixed_watchlist: set[str]) -> l
     return filtered
 
 
+async def enrich_and_score(
+    candidates: list[dict],
+    coingecko_api_key: str,
+    *,
+    limit: int = 20,
+) -> list[dict]:
+    """
+    Fetch OHLCV and taker pressure, then run smart breakout scoring.
+
+    Candidates without usable OHLCV fall back to a lighter momentum/liquidity score.
+    """
+    del coingecko_api_key  # Reserved for future CoinGecko-backed OHLCV fallbacks.
+
+    ranked = sorted(candidates, key=_enrichment_rank, reverse=True)[:limit]
+    scored: list[dict] = []
+
+    for candidate in ranked:
+        coin = dict(candidate)
+        symbol = str(coin.get("symbol", "") or "").upper()
+        binance_symbol = str(coin.get("binance_symbol", "") or f"{symbol}USDT")
+        history = await _fetch_yfinance_ohlcv(symbol)
+        if history is None:
+            _apply_fallback_score(coin, "Insufficient OHLCV data for smart scoring")
+            scored.append(coin)
+            continue
+
+        close, high, low, volume, open_ = history
+        taker_ratio = await fetch_taker_buy_ratio(binance_symbol)
+        result = score_breakout(
+            symbol=symbol,
+            close=close,
+            high=high,
+            low=low,
+            volume=volume,
+            open_=open_,
+            taker_buy_ratio=taker_ratio,
+            is_trending="trending_coingecko" in {
+                str(source)
+                for source in coin.get("sources", [coin.get("source", "unknown")])
+                if source
+            },
+            price_change_24h=float(coin.get("price_change_24h", 0) or 0),
+        )
+
+        coin["signal_score"] = int(result.total_score)
+        coin["direction"] = result.direction
+        coin["breakout_description"] = result.description
+        coin["signals_firing"] = int(result.signals_firing)
+        coin["key_level"] = result.key_level
+        coin["taker_buy_ratio"] = taker_ratio
+        coin["_close"] = close
+        coin["_high"] = high
+        coin["_low"] = low
+        coin["_volume"] = volume
+        coin["_open"] = open_
+        logger.info(
+            "Discovery: scored %s %d/100 %s (%d signals)",
+            symbol,
+            result.total_score,
+            result.direction,
+            result.signals_firing,
+        )
+        scored.append(coin)
+
+    scored.sort(
+        key=lambda item: (
+            int(item.get("signal_score", 0) or 0),
+            int(item.get("signals_firing", 0) or 0),
+            float(item.get("volume_24h", 0) or 0),
+        ),
+        reverse=True,
+    )
+    return scored
+
+
 def score_candidate(coin: dict) -> int:
-    """Score a candidate on 0-100 using momentum, liquidity, source quality, and validation."""
+    """Fallback score retained for candidates without smart-scoring data."""
+    return _basic_score(coin)
+
+
+def _basic_score(coin: dict) -> int:
+    """Fallback score used when smart-scoring data is unavailable."""
     score = 0
 
     pct = abs(float(coin.get("price_change_24h", 0) or 0))
-    if pct >= 50:
-        score += 30
-    elif pct >= 20:
+    if pct >= 20:
         score += 25
     elif pct >= 10:
-        score += 20
+        score += 15
     elif pct >= 5:
-        score += 10
+        score += 8
 
     volume = float(coin.get("volume_24h", 0) or 0)
-    if volume >= 50_000_000:
-        score += 25
-    elif volume >= 10_000_000:
+    if volume >= 10_000_000:
         score += 20
     elif volume >= 5_000_000:
         score += 15
     elif volume >= 1_000_000:
         score += 10
-    else:
-        score += 5
 
     sources = [
         str(source)
         for source in coin.get("sources", [coin.get("source", "unknown")])
         if source
     ]
-    source_scores = {
-        "trending_coingecko": 20,
-        "binance_volume": 15,
-        "top_gainer": 10,
-    }
-    score += max((source_scores.get(source, 0) for source in sources), default=0)
-    if len(set(sources)) > 1:
-        score += min(10, (len(set(sources)) - 1) * 5)
-
-    rank = _safe_int(coin.get("market_cap_rank"), default=0)
-    if 0 < rank <= 100:
+    if "trending_coingecko" in sources:
         score += 15
-    elif 0 < rank <= 300:
-        score += 10
-    elif 0 < rank <= 1000:
-        score += 5
-
     return min(score, 100)
 
 
@@ -500,6 +563,65 @@ def build_trigger_reason(coin: dict) -> str:
         if source
     ]
     return "+".join(dict.fromkeys(sources)) if sources else "unknown"
+
+
+def _apply_fallback_score(coin: dict, description: str) -> None:
+    coin["signal_score"] = _basic_score(coin)
+    coin["direction"] = "neutral"
+    coin["breakout_description"] = description
+    coin["signals_firing"] = 0
+    coin["key_level"] = None
+
+
+def _enrichment_rank(candidate: dict) -> float:
+    score = 0.0
+    score += abs(float(candidate.get("price_change_24h", 0) or 0))
+    score += min(float(candidate.get("volume_24h", 0) or 0) / 5_000_000, 20.0)
+    sources = {
+        str(source)
+        for source in candidate.get("sources", [candidate.get("source", "unknown")])
+        if source
+    }
+    if "trending_coingecko" in sources:
+        score += 10
+    if "binance_volume" in sources:
+        score += 8
+    if len(sources) > 1:
+        score += 5
+    return score
+
+
+async def _fetch_yfinance_ohlcv(
+    symbol: str,
+) -> tuple[object, object, object, object, object] | None:
+    return await asyncio.to_thread(_download_yfinance_ohlcv, symbol.upper())
+
+
+def _download_yfinance_ohlcv(
+    symbol: str,
+) -> tuple[object, object, object, object, object] | None:
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("yfinance not installed; skipping smart scoring for %s", symbol.upper())
+        return None
+
+    history = yf.Ticker(f"{symbol.upper()}-USD").history(period="90d", interval="1d", auto_adjust=False)
+    required_columns = ("Open", "Close", "High", "Low", "Volume")
+    if history.empty or any(column not in history for column in required_columns):
+        return None
+
+    cleaned = history.dropna(subset=list(required_columns))
+    if len(cleaned) < 20:
+        return None
+
+    return (
+        cleaned["Close"].to_numpy(dtype=float),
+        cleaned["High"].to_numpy(dtype=float),
+        cleaned["Low"].to_numpy(dtype=float),
+        cleaned["Volume"].to_numpy(dtype=float),
+        cleaned["Open"].to_numpy(dtype=float),
+    )
 
 
 def _parse_dollar_string(value: object) -> float:

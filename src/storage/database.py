@@ -228,6 +228,10 @@ CREATE TABLE IF NOT EXISTS hot_list (
     market_cap REAL,
     signal_score INTEGER NOT NULL DEFAULT 50,
     price_change_24h REAL,
+    direction TEXT NOT NULL DEFAULT 'neutral',
+    breakout_description TEXT,
+    signals_firing INTEGER NOT NULL DEFAULT 0,
+    key_level REAL,
     status TEXT NOT NULL DEFAULT 'active',
     binance_symbol TEXT
 );
@@ -275,6 +279,7 @@ class Database:
                 await self._configure_connection(conn, enable_wal=True)
                 await conn.executescript(SCHEMA_SQL)
                 await self._apply_prediction_outcome_migrations(conn)
+                await self._apply_hot_list_migrations(conn)
                 await conn.commit()
 
                 cursor = await conn.execute("SELECT COUNT(*) FROM watchlist WHERE is_active = 1")
@@ -299,6 +304,20 @@ class Database:
             "ALTER TABLE predictions ADD COLUMN actual_price_7d REAL",
             "ALTER TABLE predictions ADD COLUMN actual_change_7d_pct REAL",
             "ALTER TABLE predictions ADD COLUMN is_correct_7d INTEGER",
+        )
+        for statement in statements:
+            try:
+                await conn.execute(statement)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+    async def _apply_hot_list_migrations(self, conn: aiosqlite.Connection) -> None:
+        statements = (
+            "ALTER TABLE hot_list ADD COLUMN direction TEXT NOT NULL DEFAULT 'neutral'",
+            "ALTER TABLE hot_list ADD COLUMN breakout_description TEXT",
+            "ALTER TABLE hot_list ADD COLUMN signals_firing INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE hot_list ADD COLUMN key_level REAL",
         )
         for statement in statements:
             try:

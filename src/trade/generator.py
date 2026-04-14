@@ -277,6 +277,9 @@ def generate_crypto_trade_signal(
     fear_greed: FearGreedData | None = None,
     dxy: DXYData | None = None,
     ml_prediction: EnsemblePrediction | None = None,
+    breakout_score: int | None = None,
+    breakout_direction: str | None = None,
+    breakout_description: str | None = None,
 ) -> TradeSignal | None:
     factors: list[ConfluenceFactor] = []
 
@@ -738,6 +741,32 @@ def generate_crypto_trade_signal(
                 description=ml_prediction.description,
             )
         )
+
+    if breakout_score is not None and breakout_score >= 50:
+        if breakout_direction == "long_setup":
+            factors.append(
+                ConfluenceFactor(
+                    name="breakout_score",
+                    direction="bullish",
+                    strength=min(0.9, breakout_score / 100),
+                    description=(
+                        f"Breakout score: {breakout_score}/100 - "
+                        f"{breakout_description or 'multiple bullish signals converging'}"
+                    ),
+                )
+            )
+        elif breakout_direction == "short_setup":
+            factors.append(
+                ConfluenceFactor(
+                    name="breakout_score",
+                    direction="bearish",
+                    strength=min(0.9, breakout_score / 100),
+                    description=(
+                        f"Breakdown score: {breakout_score}/100 - "
+                        f"{breakout_description or 'distribution signals detected'}"
+                    ),
+                )
+            )
 
     bullish_factors = [factor for factor in factors if factor.direction == "bullish"]
     bearish_factors = [factor for factor in factors if factor.direction == "bearish"]
