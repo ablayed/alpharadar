@@ -18,6 +18,11 @@ def _utc_sql_timestamp(value: datetime | None = None) -> str:
     return current.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _entry_priority(signal_score: int, direction: str, signals_firing: int) -> tuple[int, int, int]:
+    actionable = 1 if direction in {"long_setup", "short_setup"} else 0
+    return actionable, int(signals_firing), int(signal_score)
+
+
 async def init_hot_list_table(db_path: str) -> None:
     """Create discovery tables if they do not already exist."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +116,7 @@ async def add_to_hot_list(
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT symbol, signal_score
+            SELECT symbol, signal_score, direction, signals_firing
             FROM hot_list
             WHERE symbol = ? AND status = 'active' AND datetime(expires_at) > datetime('now')
             """,
@@ -119,8 +124,13 @@ async def add_to_hot_list(
         )
         existing = await cursor.fetchone()
         if existing is not None:
-            existing_score = int(existing["signal_score"] or 0)
-            if signal_score > existing_score:
+            existing_priority = _entry_priority(
+                int(existing["signal_score"] or 0),
+                str(existing["direction"] or "neutral"),
+                int(existing["signals_firing"] or 0),
+            )
+            incoming_priority = _entry_priority(signal_score, direction, signals_firing)
+            if incoming_priority > existing_priority:
                 await db.execute(
                     """
                     UPDATE hot_list
@@ -176,16 +186,30 @@ async def add_to_hot_list(
         if active_count >= MAX_SIZE:
             cursor = await db.execute(
                 """
-                SELECT symbol, signal_score
+                SELECT symbol, signal_score, direction, signals_firing
                 FROM hot_list
                 WHERE status = 'active' AND datetime(expires_at) > datetime('now')
-                ORDER BY signal_score ASC, added_at ASC, symbol ASC
+                ORDER BY
+                    CASE WHEN direction IN ('long_setup', 'short_setup') THEN 1 ELSE 0 END ASC,
+                    signals_firing ASC,
+                    signal_score ASC,
+                    added_at ASC,
+                    symbol ASC
                 LIMIT 1
                 """
             )
             lowest = await cursor.fetchone()
-            lowest_score = int(lowest["signal_score"] or 0) if lowest is not None else 0
-            if lowest is None or signal_score <= lowest_score:
+            lowest_priority = (
+                _entry_priority(
+                    int(lowest["signal_score"] or 0),
+                    str(lowest["direction"] or "neutral"),
+                    int(lowest["signals_firing"] or 0),
+                )
+                if lowest is not None
+                else (0, 0, 0)
+            )
+            incoming_priority = _entry_priority(signal_score, direction, signals_firing)
+            if lowest is None or incoming_priority <= lowest_priority:
                 logger.info(
                     "Hot list: rejected %s score=%d because list is full",
                     symbol_upper,
@@ -199,7 +223,7 @@ async def add_to_hot_list(
             logger.info(
                 "Hot list: evicted %s score=%d for %s score=%d",
                 str(lowest["symbol"]).upper(),
-                lowest_score,
+                int(lowest["signal_score"] or 0),
                 symbol_upper,
                 signal_score,
             )

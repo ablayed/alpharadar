@@ -67,6 +67,8 @@ async def run_discovery(
 
     newly_added: list[dict] = []
     for coin in scored_candidates[:20]:
+        if int(coin.get("signal_score", 0) or 0) < 30:
+            continue
         added = await add_to_hot_list(
             db_path=db_path,
             symbol=str(coin.get("symbol", "")).upper(),

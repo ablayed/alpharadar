@@ -185,6 +185,50 @@ async def test_hot_list_evicts_lowest_score_when_full(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_hot_list_prefers_actionable_setup_over_neutral_when_full(db) -> None:
+    await init_hot_list_table(db.db_path)
+
+    for index in range(MAX_SIZE):
+        added = await add_to_hot_list(
+            db.db_path,
+            symbol=f"N{index}",
+            coingecko_id=f"neutral-{index}",
+            name=f"Neutral {index}",
+            price=1.0 + index,
+            volume=2_000_000 + index,
+            market_cap=20_000_000 + index,
+            trigger_reason="top_gainer",
+            signal_score=40 + index,
+            price_change_24h=5.0,
+            direction="neutral",
+            signals_firing=0,
+        )
+        assert added is True
+
+    added = await add_to_hot_list(
+        db.db_path,
+        symbol="SETUP",
+        coingecko_id="setup-coin",
+        name="Setup Coin",
+        price=3.0,
+        volume=9_000_000,
+        market_cap=50_000_000,
+        trigger_reason="trending_coingecko",
+        signal_score=39,
+        price_change_24h=2.0,
+        direction="long_setup",
+        signals_firing=3,
+    )
+    assert added is True
+
+    active_coins = await get_active_hot_list(db.db_path)
+    active_symbols = {coin["symbol"] for coin in active_coins}
+    assert "SETUP" in active_symbols
+    assert "N0" not in active_symbols
+    assert len(active_symbols) == MAX_SIZE
+
+
+@pytest.mark.asyncio
 async def test_run_discovery_triggers_instant_analysis_for_high_score_scored_candidates(
     db,
     monkeypatch,
@@ -266,3 +310,77 @@ async def test_run_discovery_triggers_instant_analysis_for_high_score_scored_can
 
     assert result == []
     assert instant_symbols == ["ENJ"]
+
+
+@pytest.mark.asyncio
+async def test_run_discovery_skips_sub_threshold_hot_list_entries(
+    db,
+    monkeypatch,
+) -> None:
+    low_score_candidate = {
+        "id": "fallback-coin",
+        "symbol": "WAIT",
+        "name": "Watchlist Coin",
+        "source": "trending_coingecko",
+        "sources": ["trending_coingecko"],
+        "volume_24h": 6_000_000.0,
+        "market_cap": 120_000_000.0,
+        "price_usd": 0.75,
+        "price_change_24h": 1.2,
+        "signal_score": 29,
+        "signals_firing": 0,
+        "direction": "neutral",
+        "breakout_description": "Insufficient OHLCV data for smart scoring",
+    }
+    added_symbols: list[str] = []
+
+    async def fake_fetch_sources(*, api_key: str, db_path: str) -> tuple[list[dict], list[dict], list[dict]]:
+        return [], [], []
+
+    async def fake_enrich_candidates(candidates: list[dict], api_key: str, db_path: str | None = None) -> list[dict]:
+        assert candidates == [low_score_candidate]
+        return candidates
+
+    async def fake_enrich_and_score(candidates: list[dict], coingecko_api_key: str, *, limit: int = 20) -> list[dict]:
+        assert candidates == [low_score_candidate]
+        return [dict(low_score_candidate)]
+
+    async def fake_add_to_hot_list(**kwargs) -> bool:
+        added_symbols.append(kwargs["symbol"])
+        return True
+
+    async def fake_record_discovery_run(
+        db_path: str,
+        *,
+        candidates_scanned: int,
+        candidates_safe: int,
+        added_count: int,
+        expired_count: int,
+    ) -> None:
+        assert db_path == db.db_path
+        assert candidates_scanned == 1
+        assert candidates_safe == 1
+        assert added_count == 0
+        assert expired_count == 0
+
+    async def fake_expire_old_entries(db_path: str) -> int:
+        assert db_path == db.db_path
+        return 0
+
+    monkeypatch.setattr(discovery_runner, "expire_old_entries", fake_expire_old_entries)
+    monkeypatch.setattr(discovery_runner, "_fetch_discovery_sources", fake_fetch_sources)
+    monkeypatch.setattr(discovery_runner, "merge_candidate_sources", lambda *_groups: [low_score_candidate])
+    monkeypatch.setattr(discovery_runner, "enrich_candidates", fake_enrich_candidates)
+    monkeypatch.setattr(discovery_runner, "apply_safety_filters", lambda candidates, _watchlist: candidates)
+    monkeypatch.setattr(discovery_runner, "enrich_and_score", fake_enrich_and_score)
+    monkeypatch.setattr(discovery_runner, "add_to_hot_list", fake_add_to_hot_list)
+    monkeypatch.setattr(discovery_runner, "record_discovery_run", fake_record_discovery_run)
+
+    result = await discovery_runner.run_discovery(
+        db_path=db.db_path,
+        coingecko_api_key="cg-key",
+        fixed_watchlist=set(),
+    )
+
+    assert result == []
+    assert added_symbols == []
