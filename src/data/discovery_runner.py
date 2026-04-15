@@ -17,6 +17,11 @@ from src.data.discovery import (
     fetch_coingecko_trending,
     merge_candidate_sources,
 )
+from src.data.dexscreener import (
+    discover_dex_candidates,
+    get_binance_listed_symbols,
+    goplus_check,
+)
 from src.data.hot_list import (
     add_to_hot_list,
     expire_old_entries,
@@ -48,9 +53,15 @@ async def run_discovery(
         api_key=coingecko_api_key,
         db_path=db_path,
     )
-    merged_candidates = merge_candidate_sources(trending, binance_volume, top_gainers)
-
     fixed_symbols = {symbol.upper() for symbol in fixed_watchlist}
+    binance_symbols = await get_binance_listed_symbols()
+    raw_dex_candidates = await discover_dex_candidates(
+        binance_symbols=binance_symbols | fixed_symbols,
+        max_candidates=15,
+    )
+    dex_candidates = await _apply_dex_security_checks(raw_dex_candidates)
+
+    merged_candidates = merge_candidate_sources(trending, binance_volume, top_gainers)
     prelim_candidates = [
         candidate
         for candidate in merged_candidates
@@ -60,10 +71,14 @@ async def run_discovery(
     prelim_candidates.sort(key=_preliminary_rank, reverse=True)
     enriched_candidates = await enrich_candidates(prelim_candidates[:25], coingecko_api_key, db_path=db_path)
     safe_candidates = apply_safety_filters(enriched_candidates, fixed_watchlist)
-    scored_candidates = await enrich_and_score(safe_candidates, coingecko_api_key)
+    scored_cex_candidates = await enrich_and_score(safe_candidates, coingecko_api_key)
 
-    for coin in scored_candidates:
+    for coin in scored_cex_candidates:
         coin["trigger_reason"] = build_trigger_reason(coin)
+    for coin in dex_candidates:
+        coin["trigger_reason"] = build_trigger_reason(coin)
+
+    scored_candidates = _merge_scored_candidates(dex_candidates, scored_cex_candidates)
 
     newly_added: list[dict] = []
     for coin in scored_candidates[:20]:
@@ -79,6 +94,7 @@ async def run_discovery(
             market_cap=float(coin.get("market_cap", 0) or 0),
             trigger_reason=str(coin.get("trigger_reason", coin.get("source", "unknown"))),
             signal_score=int(coin.get("signal_score", 0) or 0),
+            source=str(coin.get("source", "unknown") or "unknown"),
             price_change_24h=float(coin.get("price_change_24h", 0) or 0),
             direction=str(coin.get("direction", "neutral") or "neutral"),
             breakout_description=str(coin.get("breakout_description", "") or ""),
@@ -89,14 +105,19 @@ async def run_discovery(
                 if coin.get("binance_symbol") is not None
                 else None
             ),
+            chain_id=(str(coin.get("chain_id")) if coin.get("chain_id") else None),
+            dex_id=(str(coin.get("dex_id")) if coin.get("dex_id") else None),
+            token_address=(str(coin.get("token_address")) if coin.get("token_address") else None),
+            dex_url=(str(coin.get("dex_url")) if coin.get("dex_url") else None),
+            liquidity_usd=_optional_float(coin.get("liquidity_usd")),
         )
         if added:
             newly_added.append(coin)
 
     await record_discovery_run(
         db_path,
-        candidates_scanned=len(merged_candidates),
-        candidates_safe=len(safe_candidates),
+        candidates_scanned=len(merged_candidates) + len(raw_dex_candidates),
+        candidates_safe=len(scored_candidates),
         added_count=len(newly_added),
         expired_count=expired_count,
     )
@@ -121,7 +142,7 @@ async def run_discovery(
 
     logger.info(
         "Discovery: complete scanned=%d safe=%d added=%d expired=%d",
-        len(merged_candidates),
+        len(merged_candidates) + len(raw_dex_candidates),
         len(scored_candidates),
         len(newly_added),
         expired_count,
@@ -134,6 +155,51 @@ async def _fetch_discovery_sources(*, api_key: str, db_path: str) -> tuple[list[
     top_gainers = await fetch_coingecko_top_gainers(api_key, limit=120, db_path=db_path)
     binance_volume = await fetch_binance_volume_spikes()
     return trending, top_gainers, binance_volume
+
+
+async def _apply_dex_security_checks(candidates: list[dict]) -> list[dict]:
+    safe_candidates: list[dict] = []
+    for coin in candidates:
+        token_address = str(coin.get("token_address", "") or "")
+        if not token_address:
+            safe_candidates.append(coin)
+            continue
+        is_safe, flags = await goplus_check(
+            str(coin.get("chain_id", "") or ""),
+            token_address,
+        )
+        if is_safe:
+            safe_candidates.append(coin)
+            continue
+        logger.info(
+            "DexScreener: GoPlus rejected %s: %s",
+            str(coin.get("symbol", "")).upper(),
+            ", ".join(flags),
+        )
+    return safe_candidates
+
+
+def _merge_scored_candidates(dex_candidates: list[dict], cex_candidates: list[dict]) -> list[dict]:
+    seen_symbols: set[str] = set()
+    merged: list[dict] = []
+
+    for coin_list in (dex_candidates, cex_candidates):
+        for coin in coin_list:
+            symbol = str(coin.get("symbol", "") or "").upper()
+            if not symbol or symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            merged.append(coin)
+
+    merged.sort(
+        key=lambda coin: (
+            int(coin.get("signal_score", 0) or 0),
+            int(coin.get("signals_firing", 0) or 0),
+            float(coin.get("volume_24h", 0) or 0),
+        ),
+        reverse=True,
+    )
+    return merged
 
 
 def _preliminary_rank(candidate: dict) -> float:
@@ -205,6 +271,10 @@ async def _run_instant_trade_analysis(
     tracker,
 ) -> None:
     symbol = str(coin.get("symbol", "") or "").upper()
+    if str(coin.get("source", "") or "") == "dexscreener":
+        await _send_instant_dex_alert(bot=bot, chat_id=chat_id, coin=coin)
+        return
+
     logger.info(
         "Discovery: high-score setup %s %d/100 (%d signals), running instant analysis",
         symbol,
@@ -304,6 +374,38 @@ async def _run_instant_trade_analysis(
         )
     except Exception:
         logger.exception("Discovery: instant trade analysis failed for %s", symbol)
+
+
+async def _send_instant_dex_alert(*, bot, chat_id: int | str | None, coin: dict) -> None:
+    if bot is None or chat_id is None:
+        return
+
+    liquidity = float(coin.get("liquidity_usd", 0) or 0)
+    lines = [
+        "\U0001F525 <b>DEX TRADE ALERT</b>",
+        "",
+        (
+            f"\U0001F310 <b>{html.escape(str(coin.get('symbol', '')))}</b> "
+            f"(Score: {int(coin.get('signal_score', 0) or 0)}/100, "
+            f"{int(coin.get('signals_firing', 0) or 0)} signals)"
+        ),
+        html.escape(str(coin.get("breakout_description", "DEX momentum setup")), quote=False),
+        f"Liquidity: {_format_volume(liquidity)} | Chain: {html.escape(str(coin.get('chain_id', 'unknown')))}",
+        "DEX-only token: check pool liquidity, slippage, and contract risk before entering.",
+    ]
+    dex_url = str(coin.get("dex_url", "") or "")
+    if dex_url:
+        lines.append(f"Chart: {html.escape(dex_url)}")
+    lines.append(f"Use /trade {html.escape(str(coin.get('symbol', '')))} for the full DEX analysis.")
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("Discovery: failed to send DEX instant alert")
 
 
 async def _instant_ta_signal(coin: dict, *, db_path: str):

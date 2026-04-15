@@ -130,3 +130,54 @@ async def test_initialize_adds_multi_timeframe_prediction_columns_to_legacy_db()
         "is_correct_7d",
     }.issubset(columns)
     db_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_initialize_adds_dex_columns_to_legacy_hot_list_table() -> None:
+    test_dir = Path(".test_tmp")
+    test_dir.mkdir(exist_ok=True)
+    db_path = test_dir / f"{uuid4().hex}.db"
+
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            """
+            CREATE TABLE hot_list (
+                symbol TEXT PRIMARY KEY,
+                coingecko_id TEXT,
+                name TEXT,
+                added_at TEXT NOT NULL DEFAULT (datetime('now')),
+                expires_at TEXT NOT NULL,
+                trigger_reason TEXT,
+                initial_price REAL,
+                initial_volume REAL,
+                market_cap REAL,
+                signal_score INTEGER NOT NULL DEFAULT 50,
+                price_change_24h REAL,
+                status TEXT NOT NULL DEFAULT 'active',
+                binance_symbol TEXT
+            )
+            """
+        )
+        await conn.commit()
+
+    database = Database(str(db_path))
+    await database.initialize()
+
+    async with aiosqlite.connect(db_path) as conn:
+        cursor = await conn.execute("PRAGMA table_info(hot_list)")
+        rows = await cursor.fetchall()
+
+    columns = {str(row[1]) for row in rows}
+    assert {
+        "source",
+        "direction",
+        "breakout_description",
+        "signals_firing",
+        "key_level",
+        "chain_id",
+        "dex_id",
+        "token_address",
+        "dex_url",
+        "liquidity_usd",
+    }.issubset(columns)
+    db_path.unlink(missing_ok=True)

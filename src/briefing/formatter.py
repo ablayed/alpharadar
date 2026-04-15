@@ -747,22 +747,24 @@ class BriefingFormatter:
             return ""
 
         lines = [f"🔥 <b>HOT LIST</b> ({len(hot_list)} coin{'s' if len(hot_list) != 1 else ''})"]
-        for coin in hot_list[:5]:
+        cex_entries: list[str] = []
+        dex_entries: list[str] = []
+
+        for coin in hot_list[:6]:
             symbol = self._escape(str(coin.get("symbol", "")))
-            volume = float(coin.get("initial_volume", 0) or 0)
             score = int(coin.get("signal_score", 0) or 0)
             direction = str(coin.get("direction", "neutral") or "neutral")
+            if str(coin.get("source", "") or "") == "dexscreener":
+                chain = self._escape(str(coin.get("chain_id", "unknown")).title())
+                dex_entries.append(f"{symbol} {score}pts 🌐 {chain}")
+                continue
+
             indicator = "🟢" if direction == "long_setup" else "🔴" if direction == "short_setup" else "⚪"
-            label = "long_setup" if direction == "long_setup" else "short_setup" if direction == "short_setup" else "watching"
-            summary = self._escape(
-                str(coin.get("breakout_description", "") or coin.get("trigger_reason", "")),
-                quote=False,
-            )
-            lines.append(
-                f"{indicator} <b>{symbol}</b> | {label} | Score: {score} | "
-                f"{int(coin.get('signals_firing', 0) or 0)} signals | "
-                f"Vol: {self._format_large_currency(volume)} | {summary}"
-            )
+            cex_entries.append(f"{symbol} {score}pts {indicator}")
+        if cex_entries:
+            lines.append("CEX: " + " | ".join(cex_entries))
+        if dex_entries:
+            lines.append("DEX: " + " | ".join(dex_entries))
         return "\n".join(lines)
 
     @staticmethod

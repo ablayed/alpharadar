@@ -346,6 +346,32 @@ def test_format_daily_simplifies_market_regime_section() -> None:
     assert "MARKET REGIME" not in text
 
 
+def test_format_hot_list_section_splits_cex_and_dex_entries() -> None:
+    formatter = BriefingFormatter()
+    data = _sample_data(is_weekend=False)
+    data.hot_list = [
+        {
+            "symbol": "DOT",
+            "signal_score": 55,
+            "direction": "long_setup",
+            "source": "trending_coingecko",
+        },
+        {
+            "symbol": "GRIFF",
+            "signal_score": 72,
+            "direction": "long_setup",
+            "source": "dexscreener",
+            "chain_id": "solana",
+        },
+    ]
+
+    text = formatter.format_daily(data)
+
+    assert "<b>HOT LIST</b> (2 coins)" in text
+    assert "CEX: DOT 55pts 🟢" in text
+    assert "DEX: GRIFF 72pts 🌐 Solana" in text
+
+
 def test_sentiment_indicator_thresholds() -> None:
     positive = _make_news(
         headline="Positive",

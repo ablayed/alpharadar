@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS hot_list (
     name TEXT,
     added_at TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'unknown',
     trigger_reason TEXT,
     initial_price REAL,
     initial_volume REAL,
@@ -233,7 +234,12 @@ CREATE TABLE IF NOT EXISTS hot_list (
     signals_firing INTEGER NOT NULL DEFAULT 0,
     key_level REAL,
     status TEXT NOT NULL DEFAULT 'active',
-    binance_symbol TEXT
+    binance_symbol TEXT,
+    chain_id TEXT,
+    dex_id TEXT,
+    token_address TEXT,
+    dex_url TEXT,
+    liquidity_usd REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_hot_list_status_score
@@ -314,10 +320,16 @@ class Database:
 
     async def _apply_hot_list_migrations(self, conn: aiosqlite.Connection) -> None:
         statements = (
+            "ALTER TABLE hot_list ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'",
             "ALTER TABLE hot_list ADD COLUMN direction TEXT NOT NULL DEFAULT 'neutral'",
             "ALTER TABLE hot_list ADD COLUMN breakout_description TEXT",
             "ALTER TABLE hot_list ADD COLUMN signals_firing INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE hot_list ADD COLUMN key_level REAL",
+            "ALTER TABLE hot_list ADD COLUMN chain_id TEXT",
+            "ALTER TABLE hot_list ADD COLUMN dex_id TEXT",
+            "ALTER TABLE hot_list ADD COLUMN token_address TEXT",
+            "ALTER TABLE hot_list ADD COLUMN dex_url TEXT",
+            "ALTER TABLE hot_list ADD COLUMN liquidity_usd REAL",
         )
         for statement in statements:
             try:

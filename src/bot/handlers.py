@@ -11,7 +11,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.alerts import AlertPipeline, AlertSeverity
-from src.agents.providers import get_provider
+from src.agents.nodes.bear_researcher import SYSTEM_PROMPT as BEAR_SYSTEM_PROMPT
+from src.agents.nodes.bull_researcher import SYSTEM_PROMPT as BULL_SYSTEM_PROMPT
+from src.agents.nodes.debate_judge import SYSTEM_PROMPT as JUDGE_SYSTEM_PROMPT
+from src.agents.providers import LLMRole, get_provider
 from src.agents.state import AgentAnalysis, DebateVerdict, LLMUsageSummary
 from src.bot.messages import _send_long_message
 from src.briefing.formatter import BriefingFormatter
@@ -21,9 +24,11 @@ from src.correlation.models import LeadLagResult, PairCorrelation, RegimeState
 from src.config import settings
 from src.data.base import AssetPrice
 from src.data.aggregator import DataAggregator
+from src.data.dexscreener import DexToken, fetch_token_pairs, parse_pair_to_dex_token
 from src.data.hot_list import (
     MAX_SIZE as MAX_HOT_LIST_SIZE,
     get_active_hot_list,
+    get_hot_list_entry,
     get_latest_discovery_run,
 )
 from src.events.calibration import format_remaining_drift_status
@@ -34,7 +39,14 @@ from src.sentiment.analyzer import SentimentAnalyzer
 from src.signals.models import CompositeScore
 from src.storage.database import Database, WatchlistItem
 from src.ta.signals import TASignal
-from src.trade import OpenPosition, PortfolioTracker, TradeSignal, generate_crypto_trade_signal, generate_trade_signal
+from src.trade import (
+    ConfluenceFactor,
+    OpenPosition,
+    PortfolioTracker,
+    TradeSignal,
+    generate_crypto_trade_signal,
+    generate_trade_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -266,15 +278,24 @@ async def hotlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     lines = ["🔥 <b>HOT LIST</b> (Smart Scored)", ""]
+    dex_coins = [
+        coin for coin in hot_coins
+        if str(coin.get("source", "") or "") == "dexscreener"
+    ]
+    cex_coins = [
+        coin for coin in hot_coins
+        if str(coin.get("source", "") or "") != "dexscreener"
+    ]
+
     groups = (
-        ("🟢 <b>LONG SETUPS</b>", "long_setup", "🟢"),
-        ("🔴 <b>SHORT SETUPS</b>", "short_setup", "🔴"),
-        ("⚪ <b>WATCHING</b>", "neutral", "⚪"),
+        ("🟢 <b>LONG SETUPS (CEX)</b>", "long_setup", "🟢"),
+        ("🔴 <b>SHORT SETUPS (CEX)</b>", "short_setup", "🔴"),
+        ("⚪ <b>WATCHING (CEX)</b>", "neutral", "⚪"),
     )
     for heading, direction_key, emoji in groups:
         subset = [
             coin
-            for coin in hot_coins
+            for coin in cex_coins
             if str(coin.get("direction", "neutral") or "neutral") == direction_key
         ]
         if not subset:
@@ -293,6 +314,24 @@ async def hotlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             lines.append(
                 f"   Added: {html.escape(added)} | Expires: {html.escape(expires)} | "
                 f"Vol: ${float(coin.get('initial_volume', 0) or 0):,.0f}"
+            )
+        lines.append("")
+
+    if dex_coins:
+        lines.append("🌐 <b>DEX DISCOVERIES (pre-Binance)</b>")
+        for coin in dex_coins:
+            summary = str(coin.get("breakout_description", "") or coin.get("trigger_reason", "unknown"))
+            lines.append(
+                f"🌐 <b>{html.escape(str(coin['symbol']))}</b> "
+                f"| {int(coin.get('signal_score', 0) or 0)}/100 "
+                f"| {int(coin.get('signals_firing', 0) or 0)} signals "
+                f"| {html.escape(summary[:90], quote=False)}"
+            )
+            lines.append(
+                f"   💧 {_format_volume(float(coin.get('liquidity_usd', 0) or 0))} liquidity | "
+                f"{html.escape(str(coin.get('dex_id', 'unknown') or 'unknown').title())} on "
+                f"{html.escape(str(coin.get('chain_id', 'unknown') or 'unknown').title())} | "
+                f"{html.escape(str(coin.get('dex_url', '') or 'manual review required'))}"
             )
         lines.append("")
 
@@ -902,6 +941,11 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Usage: /trade &lt;symbol&gt;")
         return
 
+    hot_entry = await get_hot_list_entry(_db_from_context(context).db_path, symbol)
+    if hot_entry is not None and str(hot_entry.get("source", "") or "") == "dexscreener":
+        await send_dex_trade_analysis(update, context, hot_entry)
+        return
+
     msg = await update.message.reply_text(f"\U0001F3AF Generating trade signal for {html.escape(symbol)}...")
     aggregator = _aggregator_from_context(context)
 
@@ -1138,6 +1182,426 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Trades command failed")
         escaped_error = html.escape(str(exc), quote=False)
         await msg.edit_text(f"\u26A0\uFE0F Trade scan failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def send_dex_trade_analysis(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    hot_entry: dict[str, object],
+) -> None:
+    if update.message is None or update.effective_chat is None:
+        return
+
+    symbol = str(hot_entry.get("symbol", "") or "").upper()
+    msg = await update.message.reply_text(f"🎯 Generating DEX trade analysis for {html.escape(symbol)}...")
+
+    try:
+        token = await _refresh_dex_token(hot_entry)
+        signal = _build_dex_trade_signal(hot_entry, token)
+        agent_analysis = await _run_dex_agent_debate(context, hot_entry, token)
+
+        if signal is None:
+            text = _format_no_trade_text(symbol, crypto_style=True)
+            text += "\n\n" + _format_dex_market_snapshot(hot_entry, token)
+            debate_block = _format_dex_agent_block(agent_analysis)
+            if debate_block:
+                text += f"\n\n{debate_block}"
+            await _send_long_message(
+                context.bot,
+                update.effective_chat.id,
+                text,
+                initial_message=msg,
+            )
+            return
+
+        trade_text = _format_crypto_trade_text(signal)
+        trade_text += "\n\n" + _format_dex_market_snapshot(hot_entry, token)
+        debate_block = _format_dex_agent_block(agent_analysis)
+        if debate_block:
+            trade_text += f"\n\n{debate_block}"
+        trade_text += (
+            "\n\n<b>DEX-specific warnings:</b>\n"
+            "DEX-only token: check live pool liquidity before entering.\n"
+            "Use a starter size only; suggested max risk is 0.5% of portfolio.\n"
+            "Use limit orders where possible and expect slippage on smaller pools."
+        )
+        trade_text += (
+            f"\n\n<i>When you actually enter, log it with "
+            f"/log {html.escape(symbol)} &lt;ENTRY_PRICE&gt; &lt;SIZE&gt;.</i>"
+        )
+        await _send_long_message(
+            context.bot,
+            update.effective_chat.id,
+            trade_text,
+            initial_message=msg,
+        )
+
+        aggregator = _aggregator_from_context(context)
+        prediction_id = await aggregator.tracker.log_prediction(
+            symbol=symbol,
+            asset_type="crypto",
+            predicted_direction=_trade_direction_to_prediction(signal.direction),
+            confidence=signal.confidence,
+            price_at_prediction=float(token.price_usd),
+            source="trade_dex",
+            reasoning=signal.reasoning,
+            event_type="dex_trade",
+            predicted_target=signal.tp2,
+        )
+        await save_signal_to_log(signal, _db_from_context(context).db_path, signal_id=prediction_id)
+    except Exception as exc:
+        logger.exception("DEX trade command failed for %s", symbol)
+        escaped_error = html.escape(str(exc), quote=False)
+        await msg.edit_text(f"\u26A0\uFE0F DEX trade analysis failed.\n<i>{escaped_error[:250]}</i>")
+
+
+async def _refresh_dex_token(hot_entry: dict[str, object]) -> DexToken:
+    chain_id = str(hot_entry.get("chain_id", "") or "")
+    token_address = str(hot_entry.get("token_address", "") or "")
+    if chain_id and token_address:
+        pairs = await fetch_token_pairs(chain_id, token_address)
+        if pairs:
+            best_pair = max(
+                pairs,
+                key=lambda pair: float(
+                    (pair.get("volume", {}) if isinstance(pair.get("volume"), dict) else {}).get("h24", 0) or 0
+                ),
+            )
+            token = parse_pair_to_dex_token(
+                best_pair,
+                boost_count=int(hot_entry.get("boost_count", 0) or 0),
+            )
+            if token is not None:
+                return token
+    return _dex_token_from_hot_entry(hot_entry)
+
+
+def _dex_token_from_hot_entry(hot_entry: dict[str, object]) -> DexToken:
+    volume_24h = float(hot_entry.get("volume_24h", hot_entry.get("initial_volume", 0)) or 0)
+    liquidity_usd = float(hot_entry.get("liquidity_usd", 0) or 0)
+    buys_24h = int(hot_entry.get("buys_24h", 0) or 0)
+    sells_24h = int(hot_entry.get("sells_24h", 0) or 0)
+    buy_sell_ratio = float(hot_entry.get("buy_sell_ratio", 0) or 0)
+    if buy_sell_ratio <= 0 and buys_24h > 0:
+        buy_sell_ratio = buys_24h / max(sells_24h, 1)
+
+    return DexToken(
+        symbol=str(hot_entry.get("symbol", "") or "").upper(),
+        name=str(hot_entry.get("name", "") or hot_entry.get("symbol", "") or ""),
+        chain_id=str(hot_entry.get("chain_id", "") or ""),
+        token_address=str(hot_entry.get("token_address", "") or ""),
+        pair_address="",
+        dex_id=str(hot_entry.get("dex_id", "") or ""),
+        price_usd=float(hot_entry.get("initial_price", hot_entry.get("price_usd", 0)) or 0),
+        volume_24h=volume_24h,
+        volume_6h=float(hot_entry.get("volume_6h", 0) or 0),
+        volume_1h=float(hot_entry.get("volume_1h", 0) or 0),
+        liquidity_usd=liquidity_usd,
+        price_change_24h=float(hot_entry.get("price_change_24h", 0) or 0),
+        price_change_6h=float(hot_entry.get("price_change_6h", 0) or 0),
+        price_change_1h=float(hot_entry.get("price_change_1h", 0) or 0),
+        buys_24h=buys_24h,
+        sells_24h=sells_24h,
+        pair_created_at=0,
+        fdv=float(hot_entry.get("market_cap", 0) or 0),
+        market_cap=float(hot_entry.get("market_cap", 0) or 0),
+        boost_count=int(hot_entry.get("boost_count", 0) or 0),
+        has_profile=bool(hot_entry.get("has_profile", False)),
+        vl_ratio=float(hot_entry.get("vl_ratio", 0) or (volume_24h / max(liquidity_usd, 1))),
+        buy_sell_ratio=buy_sell_ratio,
+        url=str(hot_entry.get("dex_url", "") or ""),
+    )
+
+
+def _build_dex_trade_signal(hot_entry: dict[str, object], token: DexToken) -> TradeSignal | None:
+    current_price = float(token.price_usd or hot_entry.get("initial_price", 0) or 0)
+    if current_price <= 0:
+        return None
+
+    score = int(hot_entry.get("signal_score", 0) or 0)
+    if score < 55:
+        return None
+
+    direction_hint = str(hot_entry.get("direction", "neutral") or "neutral")
+    if direction_hint != "long_setup":
+        return None
+
+    liquidity_usd = float(token.liquidity_usd or hot_entry.get("liquidity_usd", 0) or 0)
+    entry_buffer_pct = 1.5 if liquidity_usd >= 250_000 else 2.0 if liquidity_usd >= 100_000 else 3.0
+    stop_pct = 8.0 if liquidity_usd >= 250_000 else 10.0 if liquidity_usd >= 100_000 else 12.0
+    tp1_pct = 8.0 if score >= 70 else 6.0
+    tp2_pct = 15.0 if score >= 70 else 12.0
+    tp3_pct = 24.0 if score >= 70 else 18.0
+
+    entry_low = current_price * (1 - entry_buffer_pct / 100)
+    entry_high = current_price
+    stop_loss = current_price * (1 - stop_pct / 100)
+    tp1 = current_price * (1 + tp1_pct / 100)
+    tp2 = current_price * (1 + tp2_pct / 100)
+    tp3 = current_price * (1 + tp3_pct / 100)
+    risk_per_unit = entry_high - stop_loss
+    if risk_per_unit <= 0:
+        return None
+
+    factors = _dex_confluence_factors(token)
+    top_factors = factors[:3]
+    reasoning = ". ".join(factor.description for factor in top_factors) or (
+        str(hot_entry.get("breakout_description", "") or "DEX momentum and liquidity setup")
+    )
+    if not reasoning.endswith("."):
+        reasoning += "."
+
+    risk_reward = (tp2 - entry_high) / risk_per_unit
+    if risk_reward < 1.5:
+        return None
+    confidence = min(0.84, 0.46 + (score / 200))
+
+    return TradeSignal(
+        symbol=str(hot_entry.get("symbol", "") or "").upper(),
+        direction="LONG",
+        confidence=round(confidence, 4),
+        entry_low=round(entry_low, _dex_price_decimals(current_price)),
+        entry_high=round(entry_high, _dex_price_decimals(current_price)),
+        stop_loss=round(stop_loss, _dex_price_decimals(current_price)),
+        stop_loss_pct=round(stop_pct, 1),
+        risk_per_unit=round(risk_per_unit, _dex_price_decimals(current_price)),
+        tp1=round(tp1, _dex_price_decimals(current_price)),
+        tp1_pct=round(tp1_pct, 1),
+        tp2=round(tp2, _dex_price_decimals(current_price)),
+        tp2_pct=round(tp2_pct, 1),
+        tp3=round(tp3, _dex_price_decimals(current_price)),
+        tp3_pct=round(tp3_pct, 1),
+        risk_reward=round(risk_reward, 1),
+        timeframe="24-72 hours",
+        reasoning=reasoning,
+        manipulation_check=_dex_manipulation_check(token),
+        confluence_count=len(factors),
+        confluence_factors=factors,
+        suggested_risk_pct=0.5,
+    )
+
+
+def _dex_confluence_factors(token: DexToken) -> list[ConfluenceFactor]:
+    factors: list[ConfluenceFactor] = []
+    if token.vl_ratio >= 2.0:
+        factors.append(
+            ConfluenceFactor(
+                name="vl_ratio",
+                direction="bullish",
+                strength=min(0.85, token.vl_ratio / 10),
+                description=f"Volume/liquidity ratio is {token.vl_ratio:.1f}x, showing active trading without extreme churn",
+            )
+        )
+    if token.buy_sell_ratio >= 1.3:
+        factors.append(
+            ConfluenceFactor(
+                name="buy_sell_ratio",
+                direction="bullish",
+                strength=min(0.8, token.buy_sell_ratio / 4),
+                description=f"Buy pressure is {token.buy_sell_ratio:.1f}x with {token.buys_24h} buys vs {token.sells_24h} sells",
+            )
+        )
+    if token.price_change_1h > 0 and token.price_change_6h > 0:
+        factors.append(
+            ConfluenceFactor(
+                name="momentum",
+                direction="bullish",
+                strength=0.75,
+                description=f"Momentum is rising across timeframes: {token.price_change_1h:+.1f}% (1h) and {token.price_change_6h:+.1f}% (6h)",
+            )
+        )
+    if token.liquidity_usd >= 100_000:
+        strength = 0.8 if token.liquidity_usd >= 500_000 else 0.65 if token.liquidity_usd >= 250_000 else 0.5
+        factors.append(
+            ConfluenceFactor(
+                name="liquidity",
+                direction="bullish",
+                strength=strength,
+                description=f"Pool liquidity is {_format_volume(token.liquidity_usd)}, which is tradable for a starter position",
+            )
+        )
+    if token.boost_count and token.boost_count <= 1500:
+        factors.append(
+            ConfluenceFactor(
+                name="boosts",
+                direction="bullish",
+                strength=0.45 if token.boost_count < 100 else 0.6,
+                description=f"DexScreener boosts are active ({token.boost_count}), so the project is paying for visibility but is not yet in the excess zone",
+            )
+        )
+    return sorted(factors, key=lambda factor: factor.strength, reverse=True)
+
+
+def _dex_manipulation_check(token: DexToken) -> str:
+    flags = [
+        "DEX-only token: verify contract, liquidity, and route quality before entering.",
+        "Suggested max risk is 0.5% of portfolio because DEX execution risk is materially higher.",
+    ]
+    if token.liquidity_usd < 250_000:
+        flags.append("Pool liquidity is below $250K, so slippage can expand quickly on market orders.")
+    if token.buy_sell_ratio > 3.0:
+        flags.append("Buy pressure is elevated; avoid chasing green candles and prefer pullbacks.")
+    if token.vl_ratio > 20:
+        flags.append("Very high volume relative to liquidity can mean a fast tape with wider spreads.")
+    return "\n".join(flags)
+
+
+def _format_dex_market_snapshot(hot_entry: dict[str, object], token: DexToken) -> str:
+    url = token.url or str(hot_entry.get("dex_url", "") or "")
+    lines = [
+        "<b>DEX market snapshot:</b>",
+        f"Chain/DEX: {html.escape(token.chain_id.title())} / {html.escape((token.dex_id or str(hot_entry.get('dex_id', 'unknown'))).title())}",
+        f"Price: {_format_trade_price(token.price_usd)} | 24h: {token.price_change_24h:+.1f}% | 6h: {token.price_change_6h:+.1f}% | 1h: {token.price_change_1h:+.1f}%",
+        f"Volume: {_format_volume(token.volume_24h)} | Liquidity: {_format_volume(token.liquidity_usd)}",
+        f"Buys/Sells: {token.buys_24h}/{token.sells_24h} | Buy pressure: {token.buy_sell_ratio:.1f}x | V/L: {token.vl_ratio:.1f}x",
+    ]
+    if url:
+        lines.append(f"Chart: {html.escape(url)}")
+    return "\n".join(lines)
+
+
+async def _run_dex_agent_debate(
+    context: ContextTypes.DEFAULT_TYPE,
+    hot_entry: dict[str, object],
+    token: DexToken,
+) -> AgentAnalysis | None:
+    aggregator = _aggregator_from_context(context)
+    llm = await aggregator._ensure_llm_client()
+    if llm is None:
+        return None
+
+    symbol = str(hot_entry.get("symbol", "") or "").upper()
+    metrics_block = _dex_metrics_prompt_block(token)
+    started_at = time.time()
+    marker = llm.mark_usage()
+
+    bull_prompt = (
+        f"Asset: {symbol} ({token.chain_id} / {token.dex_id})\n"
+        f"{metrics_block}\n\n"
+        "Construct the strongest bull case for this DEX-only token using only the supplied DexScreener metrics. "
+        "Do not assume exchange listings or news that were not provided."
+    )
+    bull = await llm.generate_json(
+        system_prompt=BULL_SYSTEM_PROMPT,
+        user_prompt=bull_prompt,
+        temperature=0.0,
+        role=LLMRole.BULL,
+    )
+
+    bear_prompt = (
+        f"Asset: {symbol} ({token.chain_id} / {token.dex_id})\n"
+        f"{metrics_block}\n\n"
+        f"The bull case argues: {str((bull or {}).get('thesis', 'N/A'))}\n"
+        f"Bull evidence: {str((bull or {}).get('evidence', []))}\n\n"
+        "Construct the strongest bear case for this DEX-only token using liquidity, momentum, and execution risk."
+    )
+    bear = await llm.generate_json(
+        system_prompt=BEAR_SYSTEM_PROMPT,
+        user_prompt=bear_prompt,
+        temperature=0.0,
+        role=LLMRole.BEAR,
+    )
+
+    judge_prompt = (
+        f"Debate for: {symbol} ({token.chain_id} / {token.dex_id})\n\n"
+        f"{metrics_block}\n\n"
+        f"BULL CASE:\nThesis: {str((bull or {}).get('thesis', 'N/A'))}\n"
+        f"Evidence: {str((bull or {}).get('evidence', []))}\n"
+        f"Confidence: {str((bull or {}).get('confidence', 'N/A'))}\n"
+        f"Catalyst: {str((bull or {}).get('catalyst', 'N/A'))}\n\n"
+        f"BEAR CASE:\nThesis: {str((bear or {}).get('thesis', 'N/A'))}\n"
+        f"Evidence: {str((bear or {}).get('evidence', []))}\n"
+        f"Bull weaknesses: {str((bear or {}).get('bull_weaknesses', []))}\n"
+        f"Confidence: {str((bear or {}).get('confidence', 'N/A'))}\n"
+        f"Risk trigger: {str((bear or {}).get('risk_trigger', 'N/A'))}\n\n"
+        "Deliver a decisive verdict using only the supplied DEX metrics and execution context."
+    )
+    judge = await llm.generate_json(
+        system_prompt=JUDGE_SYSTEM_PROMPT,
+        user_prompt=judge_prompt,
+        temperature=0.0,
+        role=LLMRole.JUDGE,
+    )
+
+    llm_usage = llm.usage_since(marker)
+    return AgentAnalysis(
+        debate_verdicts=[
+            DebateVerdict(
+                symbol=symbol,
+                display_name=symbol,
+                prevailing_view=str((judge or {}).get("prevailing_view", "neutral") or "neutral"),
+                confidence=_safe_float((judge or {}).get("confidence"), default=0.5),
+                summary=str((judge or {}).get("summary", "") or ""),
+                bull_thesis=str((bull or {}).get("thesis", "") or ""),
+                bear_thesis=str((bear or {}).get("thesis", "") or ""),
+                key_risk=str((judge or {}).get("key_risk", "") or ""),
+                action_context=str((judge or {}).get("what_to_watch", "") or ""),
+            )
+        ],
+        llm_usage=llm_usage,
+        total_llm_calls=sum(item.calls for item in llm_usage),
+        pipeline_duration_seconds=time.time() - started_at,
+    )
+
+
+def _dex_metrics_prompt_block(token: DexToken) -> str:
+    return "\n".join(
+        [
+            f"Current price: {_format_trade_price(token.price_usd)}",
+            f"24h/6h/1h change: {token.price_change_24h:+.1f}% / {token.price_change_6h:+.1f}% / {token.price_change_1h:+.1f}%",
+            f"24h volume: {_format_volume(token.volume_24h)}",
+            f"Liquidity: {_format_volume(token.liquidity_usd)}",
+            f"Buy/Sell count: {token.buys_24h} / {token.sells_24h}",
+            f"Buy/Sell ratio: {token.buy_sell_ratio:.1f}x",
+            f"Volume/Liquidity ratio: {token.vl_ratio:.1f}x",
+            f"FDV / market cap: {_format_volume(token.fdv)} / {_format_volume(token.market_cap)}",
+            f"Boost count: {token.boost_count}",
+            f"Has profile: {'yes' if token.has_profile else 'no'}",
+            "Execution context: DEX-only token, higher contract and slippage risk than a Binance-listed coin.",
+        ]
+    )
+
+
+def _format_dex_agent_block(analysis: AgentAnalysis | None) -> str:
+    if analysis is None or not analysis.debate_verdicts:
+        return ""
+
+    verdict = analysis.debate_verdicts[0]
+    emoji = {
+        "bullish": "📈",
+        "bearish": "📉",
+        "neutral": "⚖️",
+    }.get(verdict.prevailing_view, "⚖️")
+    lines = [
+        "<b>Agent debate:</b>",
+        f"{emoji} {verdict.prevailing_view.title()} ({verdict.confidence:.0%})",
+    ]
+    if verdict.summary:
+        lines.append(html.escape(verdict.summary, quote=False))
+    if verdict.bull_thesis:
+        lines.append(f"Bull case: {html.escape(verdict.bull_thesis, quote=False)}")
+    if verdict.bear_thesis:
+        lines.append(f"Bear case: {html.escape(verdict.bear_thesis, quote=False)}")
+    if verdict.key_risk:
+        lines.append(f"Key risk: {html.escape(verdict.key_risk, quote=False)}")
+    if verdict.action_context:
+        lines.append(f"Watch: {html.escape(verdict.action_context, quote=False)}")
+    return "\n".join(lines)
+
+
+def _dex_price_decimals(price: float) -> int:
+    if price >= 1:
+        return 4
+    if price >= 0.01:
+        return 6
+    return 8
+
+
+def _safe_float(value: object, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2837,7 +3301,7 @@ def _format_crypto_trade_text(signal: TradeSignal) -> str:
         f"TP3: {_format_trade_price(signal.tp3)} ({_trade_target_pct(signal.direction, signal.tp3_pct)})"
         f"{' - trail the rest' if is_long else ' - stretch target if weakness accelerates'}\n\n"
         f"<b>R:R:</b> 1:{signal.risk_reward} | <b>Timeframe:</b> {html.escape(signal.timeframe)}\n"
-        f"<b>Suggested risk:</b> {signal.suggested_risk_pct:.0f}% of portfolio\n\n"
+        f"<b>Suggested risk:</b> {_format_risk_pct(signal.suggested_risk_pct)} of portfolio\n\n"
         f"<b>Why this trade:</b>\n{confluence_lines}\n\n"
         f"{html.escape(signal.manipulation_check, quote=False)}\n\n"
         f"{_format_spot_position_sizing_text(signal)}\n\n"
@@ -2855,7 +3319,7 @@ def _format_spot_position_sizing_text(signal: TradeSignal) -> str:
     if signal.direction == "LONG":
         return (
             "<b>Position sizing example (£1,000 portfolio):</b>\n"
-            f"Max risk ({signal.suggested_risk_pct:.0f}%): £{max_risk_amount:.2f}\n"
+            f"Max risk ({_format_risk_pct(signal.suggested_risk_pct)}): £{max_risk_amount:.2f}\n"
             f"Position size: {units:.4f} {html.escape(signal.symbol)}\n"
             f"Approx notional at entry: {_format_trade_price(units * signal.entry_high)}\n"
             f"If stopped out, you lose: £{max_risk_amount:.2f}\n"
@@ -2864,7 +3328,7 @@ def _format_spot_position_sizing_text(signal: TradeSignal) -> str:
 
     return (
         "<b>Position sizing example (£1,000 portfolio):</b>\n"
-        f"Max giveback to tolerate ({signal.suggested_risk_pct:.0f}%): £{max_risk_amount:.2f}\n"
+        f"Max giveback to tolerate ({_format_risk_pct(signal.suggested_risk_pct)}): £{max_risk_amount:.2f}\n"
         f"Spot size to cap that giveback: {units:.4f} {html.escape(signal.symbol)}\n"
         f"Approx spot value near the sell zone: {_format_trade_price(units * signal.entry_low)}\n"
         f"If price invalidates above {_format_trade_price(signal.stop_loss)}, giveback is about £{max_risk_amount:.2f}\n"
@@ -3349,6 +3813,12 @@ def _trade_confluence_stars(count: int) -> str:
 def _trade_target_pct(direction: str, pct: float) -> str:
     sign = "+" if direction.upper() == "LONG" else "-"
     return f"{sign}{pct:.1f}%"
+
+
+def _format_risk_pct(value: float) -> str:
+    if float(value).is_integer():
+        return f"{value:.0f}%"
+    return f"{value:.1f}%"
 
 
 def _trade_direction_to_prediction(direction: str) -> str:

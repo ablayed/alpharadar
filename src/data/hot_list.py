@@ -35,6 +35,7 @@ async def init_hot_list_table(db_path: str) -> None:
                 name TEXT,
                 added_at TEXT NOT NULL DEFAULT (datetime('now')),
                 expires_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'unknown',
                 trigger_reason TEXT,
                 initial_price REAL,
                 initial_volume REAL,
@@ -46,7 +47,12 @@ async def init_hot_list_table(db_path: str) -> None:
                 signals_firing INTEGER NOT NULL DEFAULT 0,
                 key_level REAL,
                 status TEXT NOT NULL DEFAULT 'active',
-                binance_symbol TEXT
+                binance_symbol TEXT,
+                chain_id TEXT,
+                dex_id TEXT,
+                token_address TEXT,
+                dex_url TEXT,
+                liquidity_usd REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_hot_list_status_score
@@ -96,12 +102,18 @@ async def add_to_hot_list(
     market_cap: float,
     trigger_reason: str,
     signal_score: int,
+    source: str = "unknown",
     price_change_24h: float = 0.0,
     direction: str = "neutral",
     breakout_description: str | None = None,
     signals_firing: int = 0,
     key_level: float | None = None,
     binance_symbol: str | None = None,
+    chain_id: str | None = None,
+    dex_id: str | None = None,
+    token_address: str | None = None,
+    dex_url: str | None = None,
+    liquidity_usd: float | None = None,
     ttl_days: int = DEFAULT_TTL_DAYS,
 ) -> bool:
     """
@@ -137,6 +149,7 @@ async def add_to_hot_list(
                     SET coingecko_id = ?,
                         name = ?,
                         expires_at = ?,
+                        source = ?,
                         trigger_reason = ?,
                         initial_price = ?,
                         initial_volume = ?,
@@ -148,13 +161,19 @@ async def add_to_hot_list(
                         signals_firing = ?,
                         key_level = ?,
                         status = 'active',
-                        binance_symbol = ?
+                        binance_symbol = ?,
+                        chain_id = ?,
+                        dex_id = ?,
+                        token_address = ?,
+                        dex_url = ?,
+                        liquidity_usd = ?
                     WHERE symbol = ?
                     """,
                     (
                         coingecko_id,
                         name,
                         expires_at,
+                        source,
                         trigger_reason,
                         price,
                         volume,
@@ -166,6 +185,11 @@ async def add_to_hot_list(
                         signals_firing,
                         key_level,
                         binance_symbol,
+                        chain_id,
+                        dex_id,
+                        token_address,
+                        dex_url,
+                        liquidity_usd,
                         symbol_upper,
                     ),
                 )
@@ -236,6 +260,7 @@ async def add_to_hot_list(
                 name,
                 added_at,
                 expires_at,
+                source,
                 trigger_reason,
                 initial_price,
                 initial_volume,
@@ -247,14 +272,20 @@ async def add_to_hot_list(
                 signals_firing,
                 key_level,
                 status,
-                binance_symbol
+                binance_symbol,
+                chain_id,
+                dex_id,
+                token_address,
+                dex_url,
+                liquidity_usd
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol) DO UPDATE SET
                 coingecko_id = excluded.coingecko_id,
                 name = excluded.name,
                 added_at = excluded.added_at,
                 expires_at = excluded.expires_at,
+                source = excluded.source,
                 trigger_reason = excluded.trigger_reason,
                 initial_price = excluded.initial_price,
                 initial_volume = excluded.initial_volume,
@@ -266,7 +297,12 @@ async def add_to_hot_list(
                 signals_firing = excluded.signals_firing,
                 key_level = excluded.key_level,
                 status = excluded.status,
-                binance_symbol = excluded.binance_symbol
+                binance_symbol = excluded.binance_symbol,
+                chain_id = excluded.chain_id,
+                dex_id = excluded.dex_id,
+                token_address = excluded.token_address,
+                dex_url = excluded.dex_url,
+                liquidity_usd = excluded.liquidity_usd
             """,
             (
                 symbol_upper,
@@ -274,6 +310,7 @@ async def add_to_hot_list(
                 name,
                 _utc_sql_timestamp(),
                 expires_at,
+                source,
                 trigger_reason,
                 price,
                 volume,
@@ -285,6 +322,11 @@ async def add_to_hot_list(
                 signals_firing,
                 key_level,
                 binance_symbol,
+                chain_id,
+                dex_id,
+                token_address,
+                dex_url,
+                liquidity_usd,
             ),
         )
         await db.commit()
@@ -300,10 +342,16 @@ async def add_to_hot_list(
 
 async def _ensure_hot_list_columns(db: aiosqlite.Connection) -> None:
     statements = (
+        "ALTER TABLE hot_list ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'",
         "ALTER TABLE hot_list ADD COLUMN direction TEXT NOT NULL DEFAULT 'neutral'",
         "ALTER TABLE hot_list ADD COLUMN breakout_description TEXT",
         "ALTER TABLE hot_list ADD COLUMN signals_firing INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE hot_list ADD COLUMN key_level REAL",
+        "ALTER TABLE hot_list ADD COLUMN chain_id TEXT",
+        "ALTER TABLE hot_list ADD COLUMN dex_id TEXT",
+        "ALTER TABLE hot_list ADD COLUMN token_address TEXT",
+        "ALTER TABLE hot_list ADD COLUMN dex_url TEXT",
+        "ALTER TABLE hot_list ADD COLUMN liquidity_usd REAL",
     )
     for statement in statements:
         try:
@@ -339,6 +387,24 @@ async def remove_from_hot_list(db_path: str, symbol: str, reason: str = "manual"
         )
         await db.commit()
     return int(cursor.rowcount or 0) > 0
+
+
+async def get_hot_list_entry(db_path: str, symbol: str) -> dict[str, object] | None:
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM hot_list
+            WHERE symbol = ?
+              AND status = 'active'
+              AND datetime(expires_at) > datetime('now')
+            LIMIT 1
+            """,
+            (symbol.upper(),),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row is not None else None
 
 
 async def get_merged_watchlist(db_path: str, fixed_watchlist: list[str]) -> list[str]:

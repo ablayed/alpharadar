@@ -10,6 +10,7 @@ from src.data.hot_list import (
     add_to_hot_list,
     expire_old_entries,
     get_active_hot_list,
+    get_hot_list_entry,
     get_latest_discovery_run,
     get_merged_watchlist,
     init_hot_list_table,
@@ -129,6 +130,40 @@ async def test_hot_list_add_expire_merge_and_discovery_run(db) -> None:
     expired = await expire_old_entries(db.db_path)
     assert expired == 1
     assert await get_active_hot_list(db.db_path) == []
+
+
+@pytest.mark.asyncio
+async def test_hot_list_stores_dex_metadata(db) -> None:
+    await init_hot_list_table(db.db_path)
+
+    added = await add_to_hot_list(
+        db.db_path,
+        symbol="GRIFF",
+        coingecko_id="",
+        name="Griffain",
+        price=0.123,
+        volume=720_000,
+        market_cap=8_000_000,
+        trigger_reason="dexscreener",
+        signal_score=72,
+        source="dexscreener",
+        direction="long_setup",
+        signals_firing=4,
+        chain_id="solana",
+        dex_id="raydium",
+        token_address="token-1",
+        dex_url="https://dexscreener.com/solana/token-1",
+        liquidity_usd=180_000,
+    )
+
+    assert added is True
+    entry = await get_hot_list_entry(db.db_path, "griff")
+    assert entry is not None
+    assert entry["source"] == "dexscreener"
+    assert entry["chain_id"] == "solana"
+    assert entry["dex_id"] == "raydium"
+    assert entry["token_address"] == "token-1"
+    assert entry["liquidity_usd"] == 180_000
 
 
 @pytest.mark.asyncio
@@ -288,8 +323,20 @@ async def test_run_discovery_triggers_instant_analysis_for_high_score_scored_can
         assert db_path == db.db_path
         return 0
 
+    async def fake_get_binance_listed_symbols() -> set[str]:
+        return set()
+
+    async def fake_discover_dex_candidates(**_kwargs) -> list[dict]:
+        return []
+
+    async def fake_apply_dex_security_checks(candidates: list[dict]) -> list[dict]:
+        return candidates
+
     monkeypatch.setattr(discovery_runner, "expire_old_entries", fake_expire_old_entries)
     monkeypatch.setattr(discovery_runner, "_fetch_discovery_sources", fake_fetch_sources)
+    monkeypatch.setattr(discovery_runner, "get_binance_listed_symbols", fake_get_binance_listed_symbols)
+    monkeypatch.setattr(discovery_runner, "discover_dex_candidates", fake_discover_dex_candidates)
+    monkeypatch.setattr(discovery_runner, "_apply_dex_security_checks", fake_apply_dex_security_checks)
     monkeypatch.setattr(discovery_runner, "merge_candidate_sources", lambda *_groups: [candidate])
     monkeypatch.setattr(discovery_runner, "enrich_candidates", fake_enrich_candidates)
     monkeypatch.setattr(discovery_runner, "apply_safety_filters", lambda candidates, _watchlist: candidates)
@@ -367,8 +414,20 @@ async def test_run_discovery_skips_sub_threshold_hot_list_entries(
         assert db_path == db.db_path
         return 0
 
+    async def fake_get_binance_listed_symbols() -> set[str]:
+        return set()
+
+    async def fake_discover_dex_candidates(**_kwargs) -> list[dict]:
+        return []
+
+    async def fake_apply_dex_security_checks(candidates: list[dict]) -> list[dict]:
+        return candidates
+
     monkeypatch.setattr(discovery_runner, "expire_old_entries", fake_expire_old_entries)
     monkeypatch.setattr(discovery_runner, "_fetch_discovery_sources", fake_fetch_sources)
+    monkeypatch.setattr(discovery_runner, "get_binance_listed_symbols", fake_get_binance_listed_symbols)
+    monkeypatch.setattr(discovery_runner, "discover_dex_candidates", fake_discover_dex_candidates)
+    monkeypatch.setattr(discovery_runner, "_apply_dex_security_checks", fake_apply_dex_security_checks)
     monkeypatch.setattr(discovery_runner, "merge_candidate_sources", lambda *_groups: [low_score_candidate])
     monkeypatch.setattr(discovery_runner, "enrich_candidates", fake_enrich_candidates)
     monkeypatch.setattr(discovery_runner, "apply_safety_filters", lambda candidates, _watchlist: candidates)
