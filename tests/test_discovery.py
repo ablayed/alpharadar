@@ -3,6 +3,7 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
+from src.data import discovery_runner
 from src.data.discovery import apply_safety_filters, score_candidate
 from src.data.hot_list import (
     MAX_SIZE,
@@ -181,3 +182,87 @@ async def test_hot_list_evicts_lowest_score_when_full(db) -> None:
     assert "HIGH" in active_symbols
     assert "C0" not in active_symbols
     assert len(active_symbols) == MAX_SIZE
+
+
+@pytest.mark.asyncio
+async def test_run_discovery_triggers_instant_analysis_for_high_score_scored_candidates(
+    db,
+    monkeypatch,
+) -> None:
+    candidate = {
+        "id": "enjin-coin",
+        "symbol": "ENJ",
+        "name": "Enjin",
+        "source": "trending_coingecko",
+        "sources": ["trending_coingecko"],
+        "volume_24h": 12_300_000.0,
+        "market_cap": 400_000_000.0,
+        "price_usd": 0.41,
+        "price_change_24h": 2.8,
+        "signal_score": 78,
+        "signals_firing": 4,
+        "direction": "long_setup",
+        "breakout_description": "BB squeeze + OBV accumulation",
+    }
+    instant_symbols: list[str] = []
+
+    async def fake_fetch_sources(*, api_key: str, db_path: str) -> tuple[list[dict], list[dict], list[dict]]:
+        return [], [], []
+
+    async def fake_enrich_candidates(candidates: list[dict], api_key: str, db_path: str | None = None) -> list[dict]:
+        assert candidates == [candidate]
+        return candidates
+
+    async def fake_enrich_and_score(candidates: list[dict], coingecko_api_key: str, *, limit: int = 20) -> list[dict]:
+        assert candidates == [candidate]
+        assert coingecko_api_key == "cg-key"
+        assert limit == 20
+        return [dict(candidate)]
+
+    async def fake_add_to_hot_list(**kwargs) -> bool:
+        assert kwargs["symbol"] == "ENJ"
+        return False
+
+    async def fake_record_discovery_run(
+        db_path: str,
+        *,
+        candidates_scanned: int,
+        candidates_safe: int,
+        added_count: int,
+        expired_count: int,
+    ) -> None:
+        assert db_path == db.db_path
+        assert candidates_scanned == 1
+        assert candidates_safe == 1
+        assert added_count == 0
+        assert expired_count == 0
+
+    async def fake_instant_trade_analysis(**kwargs) -> None:
+        instant_symbols.append(kwargs["coin"]["symbol"])
+
+    async def fake_expire_old_entries(db_path: str) -> int:
+        assert db_path == db.db_path
+        return 0
+
+    monkeypatch.setattr(discovery_runner, "expire_old_entries", fake_expire_old_entries)
+    monkeypatch.setattr(discovery_runner, "_fetch_discovery_sources", fake_fetch_sources)
+    monkeypatch.setattr(discovery_runner, "merge_candidate_sources", lambda *_groups: [candidate])
+    monkeypatch.setattr(discovery_runner, "enrich_candidates", fake_enrich_candidates)
+    monkeypatch.setattr(discovery_runner, "apply_safety_filters", lambda candidates, _watchlist: candidates)
+    monkeypatch.setattr(discovery_runner, "enrich_and_score", fake_enrich_and_score)
+    monkeypatch.setattr(discovery_runner, "add_to_hot_list", fake_add_to_hot_list)
+    monkeypatch.setattr(discovery_runner, "record_discovery_run", fake_record_discovery_run)
+    monkeypatch.setattr(discovery_runner, "_run_instant_trade_analysis", fake_instant_trade_analysis)
+
+    result = await discovery_runner.run_discovery(
+        db_path=db.db_path,
+        coingecko_api_key="cg-key",
+        fixed_watchlist=set(),
+        bot=None,
+        chat_id=None,
+        ensemble=None,
+        tracker=None,
+    )
+
+    assert result == []
+    assert instant_symbols == ["ENJ"]

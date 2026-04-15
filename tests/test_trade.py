@@ -984,3 +984,45 @@ def test_generate_crypto_trade_signal_adds_ml_ensemble_factor() -> None:
     assert ml_factor.direction == "bullish"
     assert ml_factor.strength == 0.72
     assert "2/3 models predict upside" in ml_factor.description
+
+
+def test_generate_crypto_trade_signal_adds_breakout_factor() -> None:
+    signal = generate_crypto_trade_signal(
+        symbol="ENJ",
+        current_price=0.41,
+        ta_signal=_ta_signal(
+            symbol="ENJ",
+            current_price=0.41,
+            atr_value=0.015,
+            atr_pct=3.7,
+            bb_upper=0.46,
+            bb_lower=0.38,
+            trend="strong_up",
+            overall_signal="buy",
+            confidence=0.76,
+            rsi_value=54.0,
+            rsi_signal="neutral",
+            macd_signal="bullish_cross",
+            macd_histogram=0.02,
+        ),
+        composite=_composite(
+            symbol="ENJ",
+            score=0.2,
+            agreement=0.78,
+            direction="buy",
+            breakdown={"sentiment": 0.07, "ta": 0.08, "event": 0.02},
+        ),
+        verdict=_verdict(symbol="ENJ", prevailing_view="bullish", confidence=0.8),
+        event_data={"event_type": "exchange_listing", "remaining_drift_pct": 3.0},
+        regime="risk_on",
+        btc_change_pct=1.8,
+        breakout_score=78,
+        breakout_direction="long_setup",
+        breakout_description="BB squeeze + OBV accumulation + taker buy pressure",
+    )
+
+    assert signal is not None
+    breakout_factor = next(factor for factor in signal.confluence_factors if factor.name == "breakout_score")
+    assert breakout_factor.direction == "bullish"
+    assert breakout_factor.strength == 0.78
+    assert "Breakout score: 78/100" in breakout_factor.description

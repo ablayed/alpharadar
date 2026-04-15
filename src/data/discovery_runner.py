@@ -3,6 +3,7 @@ Scheduled discovery pipeline for dynamic crypto scanning.
 """
 from __future__ import annotations
 
+import html
 import logging
 
 from src.bot.handlers import save_signal_to_log
@@ -24,7 +25,7 @@ from src.data.hot_list import (
 )
 from src.ta.candles import fetch_crypto_candles
 from src.ta.signals import compute_signals
-from src.trade.generator import generate_crypto_trade_signal
+from src.trade.generator import TradeSignal, generate_crypto_trade_signal
 
 logger = logging.getLogger(__name__)
 
@@ -98,23 +99,23 @@ async def run_discovery(
         expired_count=expired_count,
     )
 
-    if newly_added:
-        if bot is not None and chat_id is not None:
-            await _send_discovery_alert(bot, chat_id, db_path, newly_added)
-        for coin in newly_added:
-            if (
-                int(coin.get("signal_score", 0) or 0) >= 70
-                and int(coin.get("signals_firing", 0) or 0) >= 3
-                and str(coin.get("direction", "neutral")) in {"long_setup", "short_setup"}
-            ):
-                await _run_instant_trade_analysis(
-                    db_path=db_path,
-                    coin=coin,
-                    bot=bot,
-                    chat_id=chat_id,
-                    ensemble=ensemble,
-                    tracker=tracker,
-                )
+    if newly_added and bot is not None and chat_id is not None:
+        await _send_discovery_alert(bot, chat_id, db_path, newly_added)
+
+    for coin in scored_candidates:
+        if (
+            int(coin.get("signal_score", 0) or 0) >= 70
+            and int(coin.get("signals_firing", 0) or 0) >= 3
+            and str(coin.get("direction", "neutral") or "neutral") in {"long_setup", "short_setup"}
+        ):
+            await _run_instant_trade_analysis(
+                db_path=db_path,
+                coin=coin,
+                bot=bot,
+                chat_id=chat_id,
+                ensemble=ensemble,
+                tracker=tracker,
+            )
 
     logger.info(
         "Discovery: complete scanned=%d safe=%d added=%d expired=%d",
@@ -152,18 +153,27 @@ def _preliminary_rank(candidate: dict) -> float:
 
 
 async def _send_discovery_alert(bot, chat_id: int | str, db_path: str, newly_added: list[dict]) -> None:
-    lines = ["🔥 <b>NEW BREAKOUT CANDIDATES DETECTED</b>", ""]
-    for coin in newly_added:
-        direction = str(coin.get("direction", "neutral") or "neutral")
-        emoji, label = _setup_badge(direction)
-        lines.append(
-            f"{emoji} <b>{label}: {coin['symbol']}</b> "
-            f"(Score: {int(coin.get('signal_score', 0) or 0)}/100, "
-            f"{int(coin.get('signals_firing', 0) or 0)} signals)"
-        )
-        lines.append(f"   {str(coin.get('breakout_description', 'No clear setup yet'))}")
-        lines.append(f"   Vol: ${float(coin.get('volume_24h', 0) or 0):,.0f}")
-        lines.append("")
+    lines = ["\U0001F525 <b>NEW BREAKOUT CANDIDATES DETECTED</b>", ""]
+    for direction_key in ("long_setup", "short_setup", "neutral"):
+        subset = [
+            coin
+            for coin in newly_added
+            if str(coin.get("direction", "neutral") or "neutral") == direction_key
+        ]
+        if not subset:
+            continue
+        for coin in subset:
+            emoji, label = _setup_badge(direction_key)
+            lines.append(
+                f"{emoji} <b>{label}: {html.escape(str(coin['symbol']))}</b> "
+                f"(Score: {int(coin.get('signal_score', 0) or 0)}/100, "
+                f"{int(coin.get('signals_firing', 0) or 0)} signals)"
+            )
+            lines.append(
+                f"   {html.escape(str(coin.get('breakout_description', 'No clear setup yet')), quote=False)}"
+            )
+            lines.append(f"   {_pressure_summary(coin)}")
+            lines.append("")
 
     active_count = len(await get_active_hot_list(db_path))
     lines.extend(
@@ -256,23 +266,22 @@ async def _run_instant_trade_analysis(
         if bot is None or chat_id is None:
             return
 
-        direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
+        direction_emoji = "\U0001F7E2" if signal.direction == "LONG" else "\U0001F534"
         direction_label = "LONG" if signal.direction == "LONG" else "SHORT BIAS"
         lines = [
-            "🔥 <b>BREAKOUT TRADE ALERT</b>",
+            "\U0001F525 <b>BREAKOUT TRADE ALERT</b>",
             "",
             (
-                f"{direction_emoji} <b>{signal.symbol} {direction_label}</b> "
+                f"{direction_emoji} <b>{html.escape(signal.symbol)} {direction_label}</b> "
                 f"(Breakout Score: {int(coin.get('signal_score', 0) or 0)}/100, "
                 f"{int(coin.get('signals_firing', 0) or 0)} signals)"
             ),
             "",
-            f"Entry: ${signal.entry_low:,.4g} - ${signal.entry_high:,.4g}",
-            f"SL: ${signal.stop_loss:,.4g} ({signal.stop_loss_pct:.1f}%)",
+            *_trade_zone_lines(signal),
             f"TP1: ${signal.tp1:,.4g} | TP2: ${signal.tp2:,.4g} | TP3: ${signal.tp3:,.4g}",
             "",
             "<b>Breakout signals:</b>",
-            str(coin.get("breakout_description", "N/A")),
+            html.escape(str(coin.get("breakout_description", "N/A")), quote=False),
             "",
             "<b>Trade confluence:</b>",
         ]
@@ -336,15 +345,51 @@ async def _instant_ta_signal(coin: dict, *, db_path: str):
 def _format_confluence_line(description: str, strength: float) -> str:
     filled = max(0, min(5, int(round(strength * 5))))
     bar = ("#" * filled) + ("-" * (5 - filled))
-    return f"[{bar}] {description}"
+    return f"[{bar}] {html.escape(description, quote=False)}"
 
 
 def _setup_badge(direction: str) -> tuple[str, str]:
     if direction == "long_setup":
-        return "🟢", "LONG SETUP"
+        return "\U0001F7E2", "LONG SETUP"
     if direction == "short_setup":
-        return "🔴", "SHORT SETUP"
-    return "⚪", "WATCHING"
+        return "\U0001F534", "SHORT SETUP"
+    return "\u26AA", "WATCHING"
+
+
+def _pressure_summary(coin: dict) -> str:
+    ratio = coin.get("taker_buy_ratio")
+    volume = float(coin.get("volume_24h", 0) or 0)
+    direction = str(coin.get("direction", "neutral") or "neutral")
+
+    if isinstance(ratio, int | float):
+        if direction == "short_setup":
+            return f"Taker sell pressure: {(1 - float(ratio)):.0%} | Vol: {_format_volume(volume)}"
+        if direction == "long_setup":
+            return f"Taker buy pressure: {float(ratio):.0%} | Vol: {_format_volume(volume)}"
+        return f"Taker buy ratio: {float(ratio):.0%} | Vol: {_format_volume(volume)}"
+    return f"Vol: {_format_volume(volume)}"
+
+
+def _trade_zone_lines(signal: TradeSignal) -> list[str]:
+    if signal.direction == "LONG":
+        return [
+            f"Entry: ${signal.entry_low:,.4g} - ${signal.entry_high:,.4g}",
+            f"SL: ${signal.stop_loss:,.4g} (-{signal.stop_loss_pct:.1f}%)",
+        ]
+    return [
+        f"Sell/reduce zone: ${signal.entry_low:,.4g} - ${signal.entry_high:,.4g}",
+        f"Invalidation: ${signal.stop_loss:,.4g} (+{signal.stop_loss_pct:.1f}%)",
+    ]
+
+
+def _format_volume(value: float) -> str:
+    if value >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"${value / 1_000:.1f}K"
+    return f"${value:,.0f}"
 
 
 def _optional_float(value: object) -> float | None:
