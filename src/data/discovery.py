@@ -570,7 +570,8 @@ def build_trigger_reason(coin: dict) -> str:
 
 
 def _apply_fallback_score(coin: dict, description: str) -> None:
-    coin["signal_score"] = _basic_score(coin)
+    # Keep fallback-only entries below the setup threshold so they don't crowd out real smart-scored signals.
+    coin["signal_score"] = min(_basic_score(coin), 29)
     coin["direction"] = "neutral"
     coin["breakout_description"] = description
     coin["signals_firing"] = 0
