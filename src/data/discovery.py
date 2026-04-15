@@ -60,6 +60,10 @@ STABLECOIN_SYMBOLS = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "PYUSD", "
 EXCLUDED_CATEGORY_KEYWORDS = {"bridged", "wrapped", "stablecoin"}
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 BINANCE_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/24hr"
+COINGECKO_MIN_REQUEST_INTERVAL_SECONDS = 2.5
+
+_coingecko_request_lock = asyncio.Lock()
+_coingecko_next_request_at = 0.0
 
 
 @dataclass(slots=True)
@@ -687,6 +691,8 @@ async def _coingecko_request_json(
     db_path: str | None,
     ttl_seconds: int,
 ) -> Any:
+    global _coingecko_next_request_at
+
     query = urlencode(sorted((key, str(value)) for key, value in params.items()))
     cache_key = f"coingecko:{endpoint}:{query}"
 
@@ -694,6 +700,15 @@ async def _coingecko_request_json(
         cached = await _get_cached_json(db_path, cache_key)
         if cached is not None:
             return cached
+
+    async with _coingecko_request_lock:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        wait_seconds = _coingecko_next_request_at - now
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+            now = loop.time()
+        _coingecko_next_request_at = now + COINGECKO_MIN_REQUEST_INTERVAL_SECONDS
 
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
