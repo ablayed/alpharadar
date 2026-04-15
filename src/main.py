@@ -116,6 +116,23 @@ async def post_init(application: Application[Any, Any, Any, Any, Any, Any]) -> N
     await setup_scheduler(application)
     await _schedule_trade_scans(application)
     application.create_task(_run_initial_ml_training(application), name="initial_ml_training")
+    await application.bot.set_my_commands([
+        ("briefing", "Daily market briefing"),
+        ("trade", "Trade signal for a symbol"),
+        ("trades", "Scan all watchlist for setups"),
+        ("hotlist", "View trending coin discoveries"),
+        ("analyze", "Deep analysis of a symbol"),
+        ("playbook", "AI trading playbook"),
+        ("ta", "Technical analysis"),
+        ("watchlist", "View crypto watchlist"),
+        ("log", "Log a trade entry"),
+        ("close", "Close a logged trade"),
+        ("journal", "View trade journal"),
+        ("accuracy", "Prediction accuracy stats"),
+        ("reflect", "Latest weekly reflection"),
+        ("status", "System status"),
+        ("help", "All commands"),
+    ])
     logger.info("AlphaRadar initialized successfully")
 
 
