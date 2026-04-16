@@ -256,12 +256,13 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
             else "default"
         )
         btc_change = _btc_change_pct(data)
-        signals: list[TradeSignal] = []
+        signals: list[tuple[TradeSignal, object | None]] = []
         ensemble = context.bot_data.get("ml_ensemble")
 
         for price_item in data.crypto_prices:
             symbol = price_item.symbol.upper()
             ta_signal = data.ta_signals.get(symbol)
+            ml_prediction = _ml_prediction_for_signal(ensemble, symbol, ta_signal)
             signal = generate_crypto_trade_signal(
                 symbol=symbol,
                 current_price=price_item.current_price,
@@ -276,21 +277,21 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                 cme_gap=data.cme_gap if symbol == "BTC" else None,
                 fear_greed=data.fear_greed,
                 dxy=data.dxy,
-                ml_prediction=_ml_prediction_for_signal(ensemble, symbol, ta_signal),
+                ml_prediction=ml_prediction,
             )
             if signal is not None:
-                signals.append(signal)
+                signals.append((signal, ml_prediction))
 
         if not signals:
             logger.info("Auto trade scan: no setups found, staying silent")
             return
 
-        signals.sort(key=lambda item: item.confidence, reverse=True)
+        signals.sort(key=lambda item: item[0].confidence, reverse=True)
 
         tracker = context.bot_data.get("tracker")
         db = context.bot_data.get("db")
         db_path = db.db_path if isinstance(db, Database) else None
-        for signal in signals:
+        for signal, ml_prediction in signals:
             prediction_id: int | None = None
             if tracker is not None:
                 prediction_id = await tracker.log_prediction(
@@ -302,13 +303,14 @@ async def auto_trade_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                     source="auto_trade_scan",
                     reasoning=signal.reasoning,
                     predicted_target=signal.tp2,
+                    metadata=_ml_prediction_metadata(ensemble, ml_prediction),
                 )
             if db_path is not None:
                 await save_signal_to_log(signal, db_path, signal_id=prediction_id)
 
         time_label = "MORNING" if hour < 12 else "EVENING"
         lines = [f"🎯 <b>{time_label} TRADE SCAN</b>  {len(signals)} setup(s) found", ""]
-        for signal in signals[:5]:
+        for signal, _ml_prediction in signals[:5]:
             direction_emoji = "🟢" if signal.direction == "LONG" else "🔴"
             lines.append(
                 f"{direction_emoji} <b>{html.escape(signal.symbol)}</b> "
@@ -617,7 +619,10 @@ async def record_prediction_outcomes(context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     try:
-        count = await aggregator.record_prediction_outcomes()
+        ensemble = context.bot_data.get("ml_ensemble")
+        count = await aggregator.record_prediction_outcomes(
+            ensemble if isinstance(ensemble, MLEnsemble) else None
+        )
         logger.info("Prediction outcome job completed: %d updates", count)
     except Exception:
         logger.exception("Prediction outcome job failed")
@@ -755,3 +760,19 @@ def _ml_prediction_for_signal(
         ta_signal._volume,
         ta_signal._open,
     )
+
+
+def _ml_prediction_metadata(ensemble_obj: object, ml_prediction: object | None) -> dict[str, object] | None:
+    if ml_prediction is None:
+        return None
+
+    metadata: dict[str, object] = {}
+    for attr in ("xgb_prob", "rf_prob", "lr_prob"):
+        value = getattr(ml_prediction, attr, None)
+        if value is not None:
+            metadata[attr] = value
+
+    if isinstance(ensemble_obj, MLEnsemble):
+        metadata["weights"] = ensemble_obj._performance.get_all_weights()
+
+    return metadata or None

@@ -332,6 +332,7 @@ async def _run_instant_trade_analysis(
                 source="discovery_breakout",
                 reasoning=signal.reasoning,
                 predicted_target=signal.tp2,
+                metadata=_ml_prediction_metadata(ensemble, ml_prediction),
             )
         await save_signal_to_log(signal, db_path, signal_id=prediction_id)
 
@@ -494,6 +495,23 @@ def _format_volume(value: float) -> str:
     if value >= 1_000:
         return f"${value / 1_000:.1f}K"
     return f"${value:,.0f}"
+
+
+def _ml_prediction_metadata(ensemble_obj: object, ml_prediction: object | None) -> dict[str, object] | None:
+    if ml_prediction is None:
+        return None
+
+    metadata: dict[str, object] = {}
+    for attr in ("xgb_prob", "rf_prob", "lr_prob"):
+        value = getattr(ml_prediction, attr, None)
+        if value is not None:
+            metadata[attr] = value
+
+    performance = getattr(ensemble_obj, "_performance", None)
+    if performance is not None and hasattr(performance, "get_all_weights"):
+        metadata["weights"] = performance.get_all_weights()
+
+    return metadata or None
 
 
 def _optional_float(value: object) -> float | None:

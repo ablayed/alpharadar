@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import aiosqlite
+
+if TYPE_CHECKING:
+    from src.ml.ensemble import MLEnsemble
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +46,18 @@ class PredictionTracker:
         reasoning: str = "",
         event_type: str | None = None,
         predicted_target: float | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> int:
         normalized_direction = _normalize_prediction_direction(predicted_direction)
         normalized_source = source.strip().lower()
+        metadata_json = json.dumps(metadata) if metadata is not None else None
         async with aiosqlite.connect(self._db_path) as connection:
             cursor = await connection.execute(
                 """
                 INSERT INTO predictions
                 (symbol, asset_type, event_type, predicted_direction, predicted_target,
-                 confidence, reasoning, source, price_at_prediction)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, reasoning, metadata, source, price_at_prediction)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol.upper(),
@@ -60,6 +67,7 @@ class PredictionTracker:
                     predicted_target,
                     confidence,
                     reasoning,
+                    metadata_json,
                     normalized_source,
                     price_at_prediction,
                 ),
@@ -67,7 +75,11 @@ class PredictionTracker:
             await connection.commit()
             return int(cursor.lastrowid)
 
-    async def record_outcomes(self, price_fetcher: PriceFetcher) -> int:
+    async def record_outcomes(
+        self,
+        price_fetcher: PriceFetcher,
+        ensemble: MLEnsemble | None = None,
+    ) -> int:
         now = datetime.now(UTC)
         passes = (
             _OutcomePass(
@@ -124,7 +136,7 @@ class PredictionTracker:
 
         total_updates = 0
         for outcome_pass in passes:
-            total_updates += await self._record_outcome_pass(price_fetcher, outcome_pass)
+            total_updates += await self._record_outcome_pass(price_fetcher, outcome_pass, ensemble)
 
         logger.info("Recorded %d prediction outcomes (1d + 3d + 5d + 7d)", total_updates)
         return total_updates
@@ -133,6 +145,7 @@ class PredictionTracker:
         self,
         price_fetcher: PriceFetcher,
         outcome_pass: _OutcomePass,
+        ensemble: MLEnsemble | None,
     ) -> int:
         rows = await _fetch_prediction_rows(
             self._db_path,
@@ -140,6 +153,7 @@ class PredictionTracker:
             where_clause=outcome_pass.where_clause,
         )
         recorded_count = 0
+        performance_updated = False
 
         for row in rows:
             current_price = await _safe_fetch_current_price(
@@ -169,6 +183,15 @@ class PredictionTracker:
 
             await _update_prediction(self._db_path, int(row["id"]), updates)
             recorded_count += 1
+            if outcome_pass.mark_outcome_recorded:
+                performance_updated = _record_ml_performance_outcome(
+                    ensemble,
+                    row,
+                    price_change_pct=change_pct,
+                ) or performance_updated
+
+        if performance_updated and ensemble is not None:
+            ensemble._performance.save()
 
         return recorded_count
 
@@ -183,7 +206,7 @@ async def _fetch_prediction_rows(
         connection.row_factory = aiosqlite.Row
         cursor = await connection.execute(
             f"""
-            SELECT id, symbol, asset_type, predicted_direction, price_at_prediction
+            SELECT id, symbol, asset_type, predicted_direction, price_at_prediction, metadata
             FROM predictions
             WHERE {where_clause}
               AND created_at < ?
@@ -192,6 +215,64 @@ async def _fetch_prediction_rows(
         )
         rows = await cursor.fetchall()
     return rows
+
+
+def _record_ml_performance_outcome(
+    ensemble: MLEnsemble | None,
+    row: aiosqlite.Row,
+    *,
+    price_change_pct: float,
+) -> bool:
+    if ensemble is None or not hasattr(ensemble, "_performance"):
+        return False
+
+    metadata = _metadata_from_row(row)
+    probs = {
+        "xgb": metadata.get("xgb_prob"),
+        "rf": metadata.get("rf_prob"),
+        "lr": metadata.get("lr_prob"),
+    }
+    if any(value is None for value in probs.values()):
+        return False
+
+    parsed_probs: dict[str, float] = {}
+    actual_up = price_change_pct > 0
+    for model_name, raw_prob in probs.items():
+        try:
+            parsed_probs[model_name] = float(raw_prob)
+        except (TypeError, ValueError):
+            return False
+
+    for model_name, prob in parsed_probs.items():
+        ensemble._performance.add_outcome(
+            symbol=str(row["symbol"]),
+            model_name=model_name,
+            predicted_up=prob > 0.5,
+            actual_up=actual_up,
+            prob=prob,
+            price_change_pct=price_change_pct,
+        )
+
+    return True
+
+
+def _metadata_from_row(row: aiosqlite.Row) -> dict[str, object]:
+    try:
+        raw_metadata = row["metadata"]
+    except (KeyError, IndexError):
+        return {}
+
+    if isinstance(raw_metadata, dict):
+        return raw_metadata
+    if not isinstance(raw_metadata, str) or not raw_metadata.strip():
+        return {}
+
+    try:
+        parsed = json.loads(raw_metadata)
+    except Exception:
+        logger.warning("Ignoring malformed prediction metadata", exc_info=True)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 async def _update_prediction(db_path: str, prediction_id: int, updates: dict[str, object]) -> None:

@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import numpy as np
 
-from src.ml.ensemble import MLDependencies, MLEnsemble
+from src.ml.ensemble import MLDependencies, MLEnsemble, ModelPerformance
 from src.ml.features import engineer_features
 
 
@@ -98,7 +98,11 @@ def test_ml_ensemble_trains_predicts_and_persists(monkeypatch) -> None:
         ),
     )
 
-    ensemble = MLEnsemble(model_dir=model_dir, min_training_samples=30)
+    ensemble = MLEnsemble(
+        model_dir=model_dir,
+        min_training_samples=30,
+        performance_file=model_dir / "performance_log.json",
+    )
 
     assert ensemble.train("BTC", X, y, feature_names=feature_names) is True
 
@@ -107,7 +111,8 @@ def test_ml_ensemble_trains_predicts_and_persists(monkeypatch) -> None:
     assert prediction.direction == "bullish"
     assert prediction.agreement == 2
     assert prediction.confidence > 0.6
-    assert "2/3 models predict upside" in prediction.description
+    assert "2/3 bullish, weighted confirms" in prediction.description
+    assert "[XGB:33% RF:33% LR:33%]" in prediction.description
     assert (model_dir / "BTC_ensemble.pkl").exists()
 
     importance = ensemble.get_feature_importance("BTC")
@@ -120,8 +125,33 @@ def test_ml_ensemble_degrades_gracefully_without_dependencies(monkeypatch) -> No
         raise ImportError("missing")
 
     monkeypatch.setattr("src.ml.ensemble._load_ml_dependencies", _missing_dependencies)
-    ensemble = MLEnsemble(model_dir=_model_dir(), min_training_samples=10)
+    model_dir = _model_dir()
+    ensemble = MLEnsemble(
+        model_dir=model_dir,
+        min_training_samples=10,
+        performance_file=model_dir / "performance_log.json",
+    )
     X = np.ones((20, 5), dtype=np.float64)
     y = np.array([0, 1] * 10, dtype=np.float64)
 
     assert ensemble.train("ETH", X, y, feature_names=["a", "b", "c", "d", "e"]) is False
+
+
+def test_model_performance_defaults_persists_and_weights_profitability() -> None:
+    perf_path = _model_dir() / "performance_log.json"
+    performance = ModelPerformance.load(perf_path)
+
+    assert performance.get_all_weights() == {"xgb": 0.3333, "rf": 0.3333, "lr": 0.3333}
+
+    for _ in range(3):
+        performance.add_outcome("BTC", "xgb", True, True, 0.7, 2.0)
+        performance.add_outcome("BTC", "rf", True, False, 0.7, -2.0)
+        performance.add_outcome("BTC", "lr", False, False, 0.4, -0.2)
+
+    weights = performance.get_all_weights()
+    assert weights["xgb"] > weights["lr"] > weights["rf"]
+    assert round(sum(weights.values()), 4) == 1.0
+
+    performance.save()
+    reloaded = ModelPerformance.load(perf_path)
+    assert len(reloaded.history) == 9

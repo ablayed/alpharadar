@@ -4,9 +4,11 @@ Lightweight ML ensemble for next-day directional prediction.
 from __future__ import annotations
 
 import logging
+import json
+import math
 import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +17,12 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path("data") / "ml_models"
-UP_VOTE_THRESHOLD = 0.55
-DOWN_VOTE_THRESHOLD = 0.45
+PERFORMANCE_FILE = MODEL_DIR / "performance_log.json"
+LOOKBACK_WINDOW = 14
+UP_VOTE_THRESHOLD = 0.5
+DOWN_VOTE_THRESHOLD = 0.5
+BULLISH_CONFIRMATION_THRESHOLD = 0.60
+BEARISH_CONFIRMATION_THRESHOLD = 0.40
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,111 @@ class EnsemblePrediction:
     last_trained: float
 
 
+@dataclass(slots=True)
+class ModelPerformance:
+    """Tracks rolling profitability for each model in the ensemble."""
+
+    history: list[dict[str, Any]] = field(default_factory=list)
+    performance_file: Path = PERFORMANCE_FILE
+
+    def add_outcome(
+        self,
+        symbol: str,
+        model_name: str,
+        predicted_up: bool,
+        actual_up: bool,
+        prob: float,
+        price_change_pct: float,
+    ) -> None:
+        """Record a resolved prediction outcome for one model."""
+        pnl = price_change_pct if predicted_up else -price_change_pct
+        now = time.time()
+        self.history.append(
+            {
+                "timestamp": now,
+                "symbol": symbol.upper(),
+                "model": model_name,
+                "predicted_up": predicted_up,
+                "actual_up": actual_up,
+                "prob": round(float(prob), 4),
+                "pnl_pct": round(float(pnl), 4),
+                "correct": predicted_up == actual_up,
+            }
+        )
+
+        cutoff = now - 90 * 86400
+        self.history = [
+            outcome
+            for outcome in self.history
+            if float(outcome.get("timestamp", 0.0) or 0.0) > cutoff
+        ]
+
+    def get_model_weight(self, model_name: str, lookback_days: int = LOOKBACK_WINDOW) -> float:
+        """Calculate a model's raw weight from recent exponentially-decayed PnL."""
+        now = time.time()
+        cutoff = now - lookback_days * 86400
+        recent = [
+            outcome
+            for outcome in self.history
+            if outcome.get("model") == model_name
+            and float(outcome.get("timestamp", 0.0) or 0.0) > cutoff
+        ]
+
+        if not recent:
+            return 1.0 / 3.0
+
+        half_life = lookback_days * 86400 / 2
+        weighted_pnl = 0.0
+        total_weight = 0.0
+        for outcome in recent:
+            age = max(now - float(outcome.get("timestamp", 0.0) or 0.0), 0.0)
+            decay = 2.0 ** (-age / half_life)
+            weighted_pnl += float(outcome.get("pnl_pct", 0.0) or 0.0) * decay
+            total_weight += decay
+
+        if total_weight == 0:
+            return 1.0 / 3.0
+
+        avg_pnl = max(-20.0, min(20.0, weighted_pnl / total_weight))
+        weight = 1.0 / (1.0 + math.exp(-avg_pnl * 0.7))
+        return max(0.1, min(1.0, weight))
+
+    def get_all_weights(self, lookback_days: int = LOOKBACK_WINDOW) -> dict[str, float]:
+        """Get normalized profitability weights for all ensemble members."""
+        raw = {
+            "xgb": self.get_model_weight("xgb", lookback_days),
+            "rf": self.get_model_weight("rf", lookback_days),
+            "lr": self.get_model_weight("lr", lookback_days),
+        }
+        total = sum(raw.values())
+        if total <= 0:
+            return {"xgb": 0.3333, "rf": 0.3333, "lr": 0.3333}
+        return {model_name: round(value / total, 4) for model_name, value in raw.items()}
+
+    def save(self) -> None:
+        """Persist performance history to disk."""
+        try:
+            self.performance_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.performance_file.open("w", encoding="utf-8") as handle:
+                json.dump(self.history, handle)
+        except Exception:
+            logger.exception("Failed to save ML performance history")
+
+    @classmethod
+    def load(cls, performance_file: Path = PERFORMANCE_FILE) -> "ModelPerformance":
+        """Load performance history from disk."""
+        perf = cls(performance_file=performance_file)
+        try:
+            if performance_file.exists():
+                with performance_file.open(encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, list):
+                    perf.history = [item for item in loaded if isinstance(item, dict)]
+        except Exception:
+            logger.exception("Failed to load ML performance history")
+        return perf
+
+
 class MLEnsemble:
     """Train and serve a compact three-model ensemble per symbol."""
 
@@ -51,9 +162,11 @@ class MLEnsemble:
         *,
         model_dir: Path | None = None,
         min_training_samples: int | None = None,
+        performance_file: Path | None = None,
     ) -> None:
         self.model_dir = model_dir or MODEL_DIR
         self._models: dict[str, dict[str, Any]] = {}
+        self._performance = ModelPerformance.load(performance_file or PERFORMANCE_FILE)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         if min_training_samples is not None:
             self.MIN_TRAINING_SAMPLES = min_training_samples
@@ -183,6 +296,7 @@ class MLEnsemble:
             return _vote_prediction(
                 symbol=symbol_upper,
                 probs={"xgb": xgb_prob, "rf": rf_prob, "lr": lr_prob},
+                weights=self._performance.get_all_weights(),
                 trained_at=float(models["trained_at"]),
             )
         except Exception:
@@ -278,38 +392,92 @@ def _vote_prediction(
     *,
     symbol: str,
     probs: dict[str, float],
+    weights: dict[str, float],
     trained_at: float,
 ) -> EnsemblePrediction:
-    bullish_votes = [prob for prob in probs.values() if prob >= UP_VOTE_THRESHOLD]
-    bearish_votes = [1.0 - prob for prob in probs.values() if prob <= DOWN_VOTE_THRESHOLD]
+    weights = {
+        "xgb": float(weights.get("xgb", 1.0 / 3.0)),
+        "rf": float(weights.get("rf", 1.0 / 3.0)),
+        "lr": float(weights.get("lr", 1.0 / 3.0)),
+    }
+    total_weight = sum(weights.values())
+    if total_weight <= 0:
+        weights = {"xgb": 1.0 / 3.0, "rf": 1.0 / 3.0, "lr": 1.0 / 3.0}
+    else:
+        weights = {model_name: weight / total_weight for model_name, weight in weights.items()}
 
-    if len(bullish_votes) >= 2:
-        agreement = len(bullish_votes)
-        avg_prob = float(np.mean(bullish_votes))
+    weighted_up_prob = sum(weights[model_name] * probs[model_name] for model_name in ("xgb", "rf", "lr"))
+    model_up_votes = {
+        model_name: prob > UP_VOTE_THRESHOLD
+        for model_name, prob in probs.items()
+    }
+    votes_up = sum(model_up_votes.values())
+    votes_down = 3 - votes_up
+    weight_text = _format_weight_text(weights)
+
+    if votes_up == 3:
         return EnsemblePrediction(
             symbol=symbol,
             direction="bullish",
-            confidence=round(avg_prob, 3),
+            confidence=round(weighted_up_prob, 3),
             xgb_prob=round(probs["xgb"], 3),
             rf_prob=round(probs["rf"], 3),
             lr_prob=round(probs["lr"], 3),
-            agreement=agreement,
-            description=f"ML ensemble: {agreement}/3 models predict upside (avg prob: {avg_prob:.0%})",
+            agreement=3,
+            description=(
+                f"ML ensemble: 3/3 unanimous bullish "
+                f"(weighted prob: {weighted_up_prob:.0%}) {weight_text}"
+            ),
             last_trained=trained_at,
         )
 
-    if len(bearish_votes) >= 2:
-        agreement = len(bearish_votes)
-        avg_prob = float(np.mean(bearish_votes))
+    if votes_down == 3:
+        confidence = 1.0 - weighted_up_prob
         return EnsemblePrediction(
             symbol=symbol,
             direction="bearish",
-            confidence=round(avg_prob, 3),
+            confidence=round(confidence, 3),
             xgb_prob=round(probs["xgb"], 3),
             rf_prob=round(probs["rf"], 3),
             lr_prob=round(probs["lr"], 3),
-            agreement=agreement,
-            description=f"ML ensemble: {agreement}/3 models predict downside (avg prob: {avg_prob:.0%})",
+            agreement=3,
+            description=(
+                f"ML ensemble: 3/3 unanimous bearish "
+                f"(weighted prob: {confidence:.0%}) {weight_text}"
+            ),
+            last_trained=trained_at,
+        )
+
+    if votes_up >= 2 and weighted_up_prob > BULLISH_CONFIRMATION_THRESHOLD:
+        return EnsemblePrediction(
+            symbol=symbol,
+            direction="bullish",
+            confidence=round(weighted_up_prob, 3),
+            xgb_prob=round(probs["xgb"], 3),
+            rf_prob=round(probs["rf"], 3),
+            lr_prob=round(probs["lr"], 3),
+            agreement=votes_up,
+            description=(
+                f"ML ensemble: {votes_up}/3 bullish, weighted confirms "
+                f"(prob: {weighted_up_prob:.0%}) {weight_text}"
+            ),
+            last_trained=trained_at,
+        )
+
+    if votes_down >= 2 and weighted_up_prob < BEARISH_CONFIRMATION_THRESHOLD:
+        confidence = 1.0 - weighted_up_prob
+        return EnsemblePrediction(
+            symbol=symbol,
+            direction="bearish",
+            confidence=round(confidence, 3),
+            xgb_prob=round(probs["xgb"], 3),
+            rf_prob=round(probs["rf"], 3),
+            lr_prob=round(probs["lr"], 3),
+            agreement=votes_down,
+            description=(
+                f"ML ensemble: {votes_down}/3 bearish, weighted confirms "
+                f"(prob: {confidence:.0%}) {weight_text}"
+            ),
             last_trained=trained_at,
         )
 
@@ -321,6 +489,13 @@ def _vote_prediction(
         rf_prob=round(probs["rf"], 3),
         lr_prob=round(probs["lr"], 3),
         agreement=0,
-        description="ML ensemble: no 2/3 consensus yet",
+        description=(
+            f"ML ensemble: no consensus "
+            f"(weighted prob: {weighted_up_prob:.0%}, votes: {votes_up}/3 up) {weight_text}"
+        ),
         last_trained=trained_at,
     )
+
+
+def _format_weight_text(weights: dict[str, float]) -> str:
+    return f"[XGB:{weights['xgb']:.0%} RF:{weights['rf']:.0%} LR:{weights['lr']:.0%}]"

@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import Awaitable
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar, cast
 from zoneinfo import ZoneInfo
 
@@ -21,7 +21,6 @@ from src.correlation import (
     CorrelationEngine,
     CorrelationSnapshot,
     LeadLagResult,
-    MarketRegime,
     PairCorrelation,
     RegimeState,
     compute_lead_lag,
@@ -759,8 +758,8 @@ class DataAggregator:
         }
         return mapping.get(view, 0.0)
 
-    async def record_prediction_outcomes(self) -> int:
-        return await self.tracker.record_outcomes(self.get_current_price)
+    async def record_prediction_outcomes(self, ensemble: object | None = None) -> int:
+        return await self.tracker.record_outcomes(self.get_current_price, ensemble=ensemble)
 
     async def run_weekly_reflection(self) -> str | None:
         llm = await self._ensure_llm_client()

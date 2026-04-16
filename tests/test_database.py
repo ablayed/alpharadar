@@ -128,6 +128,7 @@ async def test_initialize_adds_multi_timeframe_prediction_columns_to_legacy_db()
         "actual_price_7d",
         "actual_change_7d_pct",
         "is_correct_7d",
+        "metadata",
     }.issubset(columns)
     db_path.unlink(missing_ok=True)
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
 
 import aiosqlite
 import pytest
 
 from src.agents.providers import LLMRole
+from src.ml import MLEnsemble
 from src.reflection.evaluator import ReflectionEvaluator, expected_calibration_error
 from src.reflection.reflector import run_weekly_reflection
 from src.reflection.tracker import PredictionTracker
@@ -58,6 +61,56 @@ async def test_prediction_tracker_logs_and_records_outcomes(db) -> None:
     assert row[1] == 5.0
     assert row[2] == "bullish"
     assert row[3] == 1
+
+
+@pytest.mark.asyncio
+async def test_prediction_tracker_feeds_ml_performance_from_metadata(db) -> None:
+    tracker = PredictionTracker(db.db_path)
+    test_dir = Path(".test_tmp") / f"ml-{uuid4().hex}"
+    test_dir.mkdir(parents=True, exist_ok=True)
+    ensemble = MLEnsemble(
+        model_dir=test_dir / "models",
+        performance_file=test_dir / "performance_log.json",
+    )
+    prediction_id = await tracker.log_prediction(
+        symbol="BTC",
+        asset_type="crypto",
+        predicted_direction="bullish",
+        confidence=0.72,
+        price_at_prediction=100.0,
+        source="trade",
+        reasoning="ML-assisted setup.",
+        metadata={
+            "xgb_prob": 0.72,
+            "rf_prob": 0.64,
+            "lr_prob": 0.42,
+            "weights": {"xgb": 0.3333, "rf": 0.3333, "lr": 0.3333},
+        },
+    )
+
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(db.db_path) as connection:
+        await connection.execute(
+            "UPDATE predictions SET created_at = ? WHERE id = ?",
+            (stale_timestamp, prediction_id),
+        )
+        await connection.commit()
+
+    async def price_fetcher(symbol: str, asset_type: str) -> float | None:
+        assert symbol == "BTC"
+        assert asset_type == "crypto"
+        return 103.0
+
+    count = await tracker.record_outcomes(price_fetcher, ensemble=ensemble)
+
+    assert count == 1
+    assert len(ensemble._performance.history) == 3
+    pnl_by_model = {
+        outcome["model"]: outcome["pnl_pct"]
+        for outcome in ensemble._performance.history
+    }
+    assert pnl_by_model == {"xgb": 3.0, "rf": 3.0, "lr": -3.0}
+    assert (test_dir / "performance_log.json").exists()
 
 
 @pytest.mark.asyncio

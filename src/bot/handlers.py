@@ -982,9 +982,11 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             else "default"
         )
         event_payload = _event_payload(_event_for_symbol(data, symbol))
+        ensemble_obj = context.application.bot_data.get("ml_ensemble")
+        ml_prediction = None
         if price_item.asset_type.value == "crypto":
             ml_prediction = _ml_prediction_for_signal(
-                context.application.bot_data.get("ml_ensemble"),
+                ensemble_obj,
                 symbol,
                 ta_signal,
             )
@@ -1060,6 +1062,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reasoning=signal.reasoning,
             event_type=_event_type_for_symbol(data, symbol),
             predicted_target=signal.tp2,
+            metadata=_ml_prediction_metadata(ensemble_obj, ml_prediction),
         )
         await save_signal_to_log(signal, _db_from_context(context).db_path, signal_id=prediction_id)
     except Exception as exc:
@@ -1089,11 +1092,12 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else "default"
         )
         btc_change = _btc_change_pct(data)
+        ensemble_obj = context.application.bot_data.get("ml_ensemble")
         for price_item in data.crypto_prices:
             symbol = price_item.symbol.upper()
             ta_signal = data.ta_signals.get(symbol)
             ml_prediction = _ml_prediction_for_signal(
-                context.application.bot_data.get("ml_ensemble"),
+                ensemble_obj,
                 symbol,
                 ta_signal,
             )
@@ -1162,6 +1166,7 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reasoning=signal.reasoning,
                 event_type=_event_type_for_symbol(data, signal.symbol),
                 predicted_target=signal.tp2,
+                metadata=_ml_prediction_metadata(ensemble_obj, ml_prediction),
             )
             await save_signal_to_log(signal, _db_from_context(context).db_path, signal_id=prediction_id)
 
@@ -1675,6 +1680,25 @@ async def accuracy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         for source, stats in snapshot.by_source_1d.items():
             lines.append(f"{html.escape(source)}: {fmt(stats)}")
 
+    ensemble = context.application.bot_data.get("ml_ensemble")
+    if isinstance(ensemble, MLEnsemble):
+        weights = ensemble._performance.get_all_weights()
+        recent_history = [
+            outcome
+            for outcome in ensemble._performance.history
+            if float(outcome.get("timestamp", 0.0) or 0.0) > time.time() - 14 * 86400
+        ]
+        lines.extend(
+            [
+                "",
+                "<b>\U0001F4CA ML Model Weights (14-day profitability):</b>",
+                f"XGBoost: {weights['xgb']:.0%} weight",
+                f"Random Forest: {weights['rf']:.0%} weight",
+                f"Logistic Regression: {weights['lr']:.0%} weight",
+                f"Based on {len(recent_history)} resolved model outcomes",
+            ]
+        )
+
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -1895,6 +1919,29 @@ async def _legacy_status_command(update: Update, context: ContextTypes.DEFAULT_T
     correlation_pair_count = _correlation_pair_count(bot_data)
     ws_state = _websocket_status_text(context)
     uptime = _uptime_text(context)
+    stocks = await db.get_watchlist("stock")
+    crypto = crypto_items
+    sentiment_cache_count = await db.get_sentiment_cache_count()
+    model_status = _status_label(aggregator.sentiment_analyzer.is_available())
+    next_briefing = _next_briefing_text()
+    _ = (
+        hot_coins,
+        latest_discovery,
+        ml_section,
+        last_trained_text,
+        n_funding,
+        n_oi,
+        fear_greed,
+        dxy,
+        btc_dominance,
+        regime_text,
+        cme_status,
+        active_trades,
+        closed_trades,
+        predictions_logged,
+        total_risk,
+        correlation_pair_count,
+    )
 
     text = (
         "🔧 <b>ALPHARADAR STATUS</b>\n\n"
@@ -1944,6 +1991,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     crypto_items = await db.get_watchlist("crypto")
     crypto_symbols = sorted({item.symbol.upper() for item in crypto_items})
+    hot_coins = await get_active_hot_list(db.db_path)
+    latest_discovery = await get_latest_discovery_run(db.db_path)
     ml_section, last_trained_text = _format_ml_status_lines(
         bot_data.get("ml_ensemble"),
         crypto_symbols,
@@ -2315,6 +2364,12 @@ def _format_ml_status_lines(
 
     if not lines:
         lines.append("   No crypto symbols tracked")
+
+    weights = ensemble_obj._performance.get_all_weights()
+    lines.append(
+        f"   Model weights: XGB={weights['xgb']:.0%} "
+        f"RF={weights['rf']:.0%} LR={weights['lr']:.0%}"
+    )
 
     last_trained_text = _format_timestamp(max(trained_at_values)) if trained_at_values else "Never"
     return "\n".join(lines), last_trained_text
@@ -3805,6 +3860,16 @@ def _format_trade_price(value: float) -> str:
     return f"${value:.4f}"
 
 
+def _format_volume(value: float) -> str:
+    if value >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"${value / 1_000:.1f}K"
+    return f"${value:,.0f}"
+
+
 def _trade_confluence_stars(count: int) -> str:
     filled = max(0, min(5, count))
     return ("*" * filled) + ("." * (5 - filled))
@@ -3823,3 +3888,19 @@ def _format_risk_pct(value: float) -> str:
 
 def _trade_direction_to_prediction(direction: str) -> str:
     return "bullish" if direction.upper() == "LONG" else "bearish"
+
+
+def _ml_prediction_metadata(ensemble_obj: object, ml_prediction: object | None) -> dict[str, object] | None:
+    if ml_prediction is None:
+        return None
+
+    metadata: dict[str, object] = {}
+    for attr in ("xgb_prob", "rf_prob", "lr_prob"):
+        value = getattr(ml_prediction, attr, None)
+        if value is not None:
+            metadata[attr] = value
+
+    if isinstance(ensemble_obj, MLEnsemble):
+        metadata["weights"] = ensemble_obj._performance.get_all_weights()
+
+    return metadata or None

@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     predicted_target REAL,
     confidence REAL NOT NULL,
     reasoning TEXT,
+    metadata TEXT,
     source TEXT NOT NULL,
     price_at_prediction REAL NOT NULL,
     outcome_recorded INTEGER NOT NULL DEFAULT 0,
@@ -310,6 +311,7 @@ class Database:
             "ALTER TABLE predictions ADD COLUMN actual_price_7d REAL",
             "ALTER TABLE predictions ADD COLUMN actual_change_7d_pct REAL",
             "ALTER TABLE predictions ADD COLUMN is_correct_7d INTEGER",
+            "ALTER TABLE predictions ADD COLUMN metadata TEXT",
         )
         for statement in statements:
             try:
