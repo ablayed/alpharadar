@@ -81,58 +81,7 @@ class PredictionTracker:
         ensemble: MLEnsemble | None = None,
     ) -> int:
         now = datetime.now(UTC)
-        passes = (
-            _OutcomePass(
-                label="1d",
-                before=now - timedelta(hours=24),
-                where_clause="outcome_recorded = 0 AND actual_price_1d IS NULL",
-                price_column="actual_price_1d",
-                change_column="actual_change_1d_pct",
-                correct_column="is_correct_1d",
-                neutral_band=0.5,
-                update_actual_direction=True,
-                mark_outcome_recorded=True,
-            ),
-            _OutcomePass(
-                label="3d",
-                before=now - timedelta(days=3),
-                where_clause=(
-                    "outcome_recorded = 1 "
-                    "AND actual_price_1d IS NOT NULL "
-                    "AND actual_price_3d IS NULL"
-                ),
-                price_column="actual_price_3d",
-                change_column="actual_change_3d_pct",
-                correct_column="is_correct_3d",
-                neutral_band=1.0,
-            ),
-            _OutcomePass(
-                label="5d",
-                before=now - timedelta(days=5),
-                where_clause=(
-                    "outcome_recorded = 1 "
-                    "AND actual_price_1d IS NOT NULL "
-                    "AND actual_price_5d IS NULL"
-                ),
-                price_column="actual_price_5d",
-                change_column="actual_change_5d_pct",
-                correct_column="is_correct_5d",
-                neutral_band=2.0,
-            ),
-            _OutcomePass(
-                label="7d",
-                before=now - timedelta(days=7),
-                where_clause=(
-                    "outcome_recorded = 1 "
-                    "AND actual_price_1d IS NOT NULL "
-                    "AND actual_price_7d IS NULL"
-                ),
-                price_column="actual_price_7d",
-                change_column="actual_change_7d_pct",
-                correct_column="is_correct_7d",
-                neutral_band=2.0,
-            ),
-        )
+        passes = build_outcome_passes(now)
 
         total_updates = 0
         for outcome_pass in passes:
@@ -194,6 +143,61 @@ class PredictionTracker:
             ensemble._performance.save()
 
         return recorded_count
+
+
+def build_outcome_passes(now: datetime) -> tuple[_OutcomePass, ...]:
+    return (
+        _OutcomePass(
+            label="1d",
+            before=now - timedelta(hours=24),
+            where_clause="outcome_recorded = 0 AND actual_price_1d IS NULL",
+            price_column="actual_price_1d",
+            change_column="actual_change_1d_pct",
+            correct_column="is_correct_1d",
+            neutral_band=0.5,
+            update_actual_direction=True,
+            mark_outcome_recorded=True,
+        ),
+        _OutcomePass(
+            label="3d",
+            before=now - timedelta(days=3),
+            where_clause=(
+                "outcome_recorded = 1 "
+                "AND actual_price_1d IS NOT NULL "
+                "AND actual_price_3d IS NULL"
+            ),
+            price_column="actual_price_3d",
+            change_column="actual_change_3d_pct",
+            correct_column="is_correct_3d",
+            neutral_band=1.0,
+        ),
+        _OutcomePass(
+            label="5d",
+            before=now - timedelta(days=5),
+            where_clause=(
+                "outcome_recorded = 1 "
+                "AND actual_price_1d IS NOT NULL "
+                "AND actual_price_5d IS NULL"
+            ),
+            price_column="actual_price_5d",
+            change_column="actual_change_5d_pct",
+            correct_column="is_correct_5d",
+            neutral_band=2.0,
+        ),
+        _OutcomePass(
+            label="7d",
+            before=now - timedelta(days=7),
+            where_clause=(
+                "outcome_recorded = 1 "
+                "AND actual_price_1d IS NOT NULL "
+                "AND actual_price_7d IS NULL"
+            ),
+            price_column="actual_price_7d",
+            change_column="actual_change_7d_pct",
+            correct_column="is_correct_7d",
+            neutral_band=2.0,
+        ),
+    )
 
 
 async def _fetch_prediction_rows(
