@@ -6,10 +6,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import aiosqlite
+import httpx
 import pytest
 import pytest_asyncio
 
 from scripts.backfill_historical_outcomes import backfill_historical_outcomes
+from src.reflection import historical_backfill
 from src.reflection import tracker as tracker_module
 from src.storage.database import Database
 
@@ -293,3 +295,34 @@ async def test_historical_backfill_live_writes_expected_values_and_is_idempotent
     assert btc_row == (1, 101.0, 1.0, 1, "bullish", 103.0, 3.0, 1, 106.0, 6.0, 1, 104.0, 4.0, 1)
     assert sol_row == (1, 99.0, -1.0, 0, "bearish", 102.0, 2.0, 1)
     assert ada_row == (1, 105.0, 5.0, 1, None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_repository_historical_price_fetcher_falls_back_after_finnhub_403(
+    backfill_db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_at = _fixture_now() - timedelta(days=1)
+    fetcher = historical_backfill.RepositoryHistoricalPriceFetcher(
+        db_path=backfill_db.db_path,
+        finnhub_api_key="test-key",
+    )
+
+    request = httpx.Request("GET", "https://finnhub.io/api/v1/stock/candle")
+    response = httpx.Response(403, request=request)
+
+    async def fake_finnhub(symbol: str, target_at_value: datetime, api_key: str) -> float | None:
+        del symbol, target_at_value, api_key
+        raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
+
+    def fake_yfinance(symbol: str, target_at_value: datetime) -> float | None:
+        assert symbol == "AAPL"
+        assert target_at_value == target_at
+        return 111.0
+
+    monkeypatch.setattr(historical_backfill, "_fetch_finnhub_stock_close", fake_finnhub)
+    monkeypatch.setattr(historical_backfill, "_download_yfinance_stock_close", fake_yfinance)
+
+    price = await fetcher("AAPL", "stock", target_at)
+
+    assert price == 111.0

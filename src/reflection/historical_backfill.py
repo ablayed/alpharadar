@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ import httpx
 from src.ta.candles import COINGECKO_BASE, FINNHUB_BASE
 
 HistoricalPriceFetcher = Callable[[str, str, datetime], Awaitable[float | None]]
+logger = logging.getLogger(__name__)
 
 
 class RepositoryHistoricalPriceFetcher:
@@ -45,10 +47,28 @@ class RepositoryHistoricalPriceFetcher:
 
     async def _fetch_stock_price(self, symbol: str, target_at: datetime) -> float | None:
         if self._finnhub_api_key:
-            price = await _fetch_finnhub_stock_close(symbol, target_at, self._finnhub_api_key)
+            try:
+                price = await _fetch_finnhub_stock_close(symbol, target_at, self._finnhub_api_key)
+            except Exception:
+                logger.warning(
+                    "Historical Finnhub lookup failed for %s at %s",
+                    symbol,
+                    target_at.date().isoformat(),
+                    exc_info=True,
+                )
+                price = None
             if price is not None:
                 return price
-        return await asyncio.to_thread(_download_yfinance_stock_close, symbol, target_at)
+        try:
+            return await asyncio.to_thread(_download_yfinance_stock_close, symbol, target_at)
+        except Exception:
+            logger.warning(
+                "Historical yfinance lookup failed for %s at %s",
+                symbol,
+                target_at.date().isoformat(),
+                exc_info=True,
+            )
+            return None
 
     async def _fetch_crypto_price(self, symbol: str, target_at: datetime) -> float | None:
         coin_id = await self._coin_id_for_symbol(symbol)
@@ -93,21 +113,30 @@ class RepositoryHistoricalPriceFetcher:
 
 
 async def _fetch_finnhub_stock_close(symbol: str, target_at: datetime, api_key: str) -> float | None:
-    from_timestamp = int((target_at - timedelta(days=7)).timestamp())
-    to_timestamp = int((target_at + timedelta(days=7)).timestamp())
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{FINNHUB_BASE}/stock/candle",
-            params={
-                "symbol": symbol,
-                "resolution": "D",
-                "from": from_timestamp,
-                "to": to_timestamp,
-                "token": api_key,
-            },
+    try:
+        from_timestamp = int((target_at - timedelta(days=7)).timestamp())
+        to_timestamp = int((target_at + timedelta(days=7)).timestamp())
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{FINNHUB_BASE}/stock/candle",
+                params={
+                    "symbol": symbol,
+                    "resolution": "D",
+                    "from": from_timestamp,
+                    "to": to_timestamp,
+                    "token": api_key,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        logger.warning(
+            "Historical Finnhub lookup failed for %s at %s",
+            symbol,
+            target_at.date().isoformat(),
+            exc_info=True,
         )
-        response.raise_for_status()
-        payload = response.json()
+        return None
 
     closes = payload.get("c")
     timestamps = payload.get("t")
@@ -122,37 +151,55 @@ def _download_yfinance_stock_close(symbol: str, target_at: datetime) -> float | 
     except ImportError:
         return None
 
-    start = (target_at - timedelta(days=7)).date().isoformat()
-    end = (target_at + timedelta(days=8)).date().isoformat()
-    history = yf.Ticker(symbol).history(
-        start=start,
-        end=end,
-        interval="1d",
-        auto_adjust=False,
-    )
-    if history.empty or "Close" not in history:
-        return None
+    try:
+        start = (target_at - timedelta(days=7)).date().isoformat()
+        end = (target_at + timedelta(days=8)).date().isoformat()
+        history = yf.Ticker(symbol).history(
+            start=start,
+            end=end,
+            interval="1d",
+            auto_adjust=False,
+        )
+        if history.empty or "Close" not in history:
+            return None
 
-    target_date = target_at.astimezone(UTC).date()
-    for index, row in history.iterrows():
-        if index.date() >= target_date:
-            close_value = row.get("Close")
-            if close_value is None:
-                return None
-            return float(close_value)
-    return None
+        target_date = target_at.astimezone(UTC).date()
+        for index, row in history.iterrows():
+            if index.date() >= target_date:
+                close_value = row.get("Close")
+                if close_value is None:
+                    return None
+                return float(close_value)
+        return None
+    except Exception:
+        logger.warning(
+            "Historical yfinance lookup failed for %s at %s",
+            symbol,
+            target_at.date().isoformat(),
+            exc_info=True,
+        )
+        return None
 
 
 async def _fetch_coingecko_crypto_close(coin_id: str, target_at: datetime) -> float | None:
-    now = datetime.now(UTC)
-    days = max(7, math.ceil((now - target_at).total_seconds() / 86400) + 7)
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{COINGECKO_BASE}/coins/{coin_id}/ohlc",
-            params={"vs_currency": "usd", "days": days},
+    try:
+        now = datetime.now(UTC)
+        days = max(7, math.ceil((now - target_at).total_seconds() / 86400) + 7)
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{COINGECKO_BASE}/coins/{coin_id}/ohlc",
+                params={"vs_currency": "usd", "days": days},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception:
+        logger.warning(
+            "Historical CoinGecko lookup failed for %s at %s",
+            coin_id,
+            target_at.date().isoformat(),
+            exc_info=True,
         )
-        response.raise_for_status()
-        payload = response.json()
+        return None
 
     if not isinstance(payload, list):
         return None
