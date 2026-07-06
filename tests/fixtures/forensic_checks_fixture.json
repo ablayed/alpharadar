@@ -1,0 +1,49 @@
+{
+  "ordering_check_rows": [
+    {"id": 9000, "prediction_ts": "2026-05-01T11:55:00Z", "entry_open_time": "2026-05-01T12:00:00Z", "outcome_open_time": "2026-05-02T12:00:00Z"},
+    {"id": 9001, "prediction_ts": "2026-05-01T12:05:00Z", "entry_open_time": "2026-05-01T12:00:00Z", "outcome_open_time": "2026-05-02T12:00:00Z"}
+  ],
+  "price_source_rows": [
+    {"id": 9002, "prediction_price": 100.00, "stored_prediction_price_from_candle": 100.02, "resolution_price": 104.50, "candle_close_price": 104.50}
+  ],
+  "duplicate_rows": [
+    {"id": 9003, "symbol": "ADAUSDT", "source": "trade", "prediction_ts": "2026-05-03T08:00:00Z", "raw_probability": 0.62, "entry_price": 0.450},
+    {"id": 9004, "symbol": "ADAUSDT", "source": "trade", "prediction_ts": "2026-05-03T08:00:00Z", "raw_probability": 0.62, "entry_price": 0.451}
+  ],
+  "neutral_audit_rows": [
+    {"id": 9101, "symbol": "BTCUSDT", "direction": "NEUTRAL", "horizon": "1d", "actual_move_pct_within_horizon": 7.2},
+    {"id": 9102, "symbol": "ETHUSDT", "direction": "NEUTRAL", "horizon": "3d", "actual_move_pct_within_horizon": -6.1},
+    {"id": 9103, "symbol": "SOLUSDT", "direction": "NEUTRAL", "horizon": "1d", "actual_move_pct_within_horizon": 3.0},
+    {"id": 9104, "symbol": "ADAUSDT", "direction": "NEUTRAL", "horizon": "7d", "actual_move_pct_within_horizon": -1.5}
+  ],
+  "briefing_test_rows": [
+    {"id": 8101, "source": "briefing_test", "outcome_label": 1}, {"id": 8102, "source": "briefing_test", "outcome_label": 1},
+    {"id": 8103, "source": "briefing_test", "outcome_label": 1}, {"id": 8104, "source": "briefing_test", "outcome_label": 1},
+    {"id": 8105, "source": "briefing_test", "outcome_label": 1}, {"id": 8106, "source": "briefing_test", "outcome_label": 1},
+    {"id": 8107, "source": "briefing_test", "outcome_label": 1}, {"id": 8108, "source": "briefing_test", "outcome_label": 1},
+    {"id": 8109, "source": "briefing_test", "outcome_label": 1}, {"id": 8110, "source": "briefing_test", "outcome_label": 1},
+    {"id": 8111, "source": "briefing_test", "outcome_label": 0}, {"id": 8112, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8113, "source": "briefing_test", "outcome_label": 0}, {"id": 8114, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8115, "source": "briefing_test", "outcome_label": 0}, {"id": 8116, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8117, "source": "briefing_test", "outcome_label": 0}, {"id": 8118, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8119, "source": "briefing_test", "outcome_label": 0}, {"id": 8120, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8121, "source": "briefing_test", "outcome_label": 0}, {"id": 8122, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8123, "source": "briefing_test", "outcome_label": 0}, {"id": 8124, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8125, "source": "briefing_test", "outcome_label": 0}, {"id": 8126, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8127, "source": "briefing_test", "outcome_label": 0}, {"id": 8128, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8129, "source": "briefing_test", "outcome_label": 0}, {"id": 8130, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8131, "source": "briefing_test", "outcome_label": 0}, {"id": 8132, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8133, "source": "briefing_test", "outcome_label": 0}, {"id": 8134, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8135, "source": "briefing_test", "outcome_label": 0}, {"id": 8136, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8137, "source": "briefing_test", "outcome_label": 0}, {"id": 8138, "source": "briefing_test", "outcome_label": 0},
+    {"id": 8139, "source": "briefing_test", "outcome_label": 0}, {"id": 8140, "source": "briefing_test", "outcome_label": 0}
+  ],
+  "new_source_test_rows": [
+    {"id": 8201, "source": "new_source_test", "outcome_label": 1}, {"id": 8202, "source": "new_source_test", "outcome_label": 1},
+    {"id": 8203, "source": "new_source_test", "outcome_label": 0}, {"id": 8204, "source": "new_source_test", "outcome_label": 0},
+    {"id": 8205, "source": "new_source_test", "outcome_label": 0}, {"id": 8206, "source": "new_source_test", "outcome_label": 0},
+    {"id": 8207, "source": "new_source_test", "outcome_label": 0}, {"id": 8208, "source": "new_source_test", "outcome_label": 0},
+    {"id": 8209, "source": "new_source_test", "outcome_label": 0}, {"id": 8210, "source": "new_source_test", "outcome_label": 0},
+    {"id": 8211, "source": "new_source_test", "outcome_label": 0}, {"id": 8212, "source": "new_source_test", "outcome_label": 0}
+  ]
+}

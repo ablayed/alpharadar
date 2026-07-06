@@ -1,0 +1,8 @@
+[
+  {"id": 1, "source": "auto_trade_scan", "symbol": "BTCUSDT", "confidence_bucket": "0.65_0.70", "regime": "BULL_TREND", "outcome_label": 1, "gross_return_pct": 1.0},
+  {"id": 2, "source": "auto_trade_scan", "symbol": "ETHUSDT", "confidence_bucket": "0.60_0.65", "regime": "BULL_TREND", "outcome_label": 0, "gross_return_pct": -0.5},
+  {"id": 3, "source": "auto_trade_scan", "symbol": "SOLUSDT", "confidence_bucket": "0.65_0.70", "regime": "SIDEWAYS",  "outcome_label": 1, "gross_return_pct": 0.8},
+  {"id": 4, "source": "briefing",        "symbol": "BTCUSDT", "confidence_bucket": "0.55_0.60", "regime": "BULL_TREND", "outcome_label": 0, "gross_return_pct": -1.2},
+  {"id": 5, "source": "briefing",        "symbol": "ETHUSDT", "confidence_bucket": "0.55_0.60", "regime": "SIDEWAYS",  "outcome_label": 0, "gross_return_pct": -0.9},
+  {"id": 6, "source": "briefing",        "symbol": "SOLUSDT", "confidence_bucket": "0.50_0.55", "regime": "BULL_TREND", "outcome_label": 1, "gross_return_pct": 0.3}
+]

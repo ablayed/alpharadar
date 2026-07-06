@@ -16,3 +16,6 @@ dist/
 *.egg-info/
 ssh-key
 ssh-key.pub
+
+.serena/
+audit_verdict.md
