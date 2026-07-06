@@ -65,7 +65,7 @@ async def test_open_ended_window_catches_all_ages(db) -> None:
             created_at=created_at,
             symbol=f"COIN{hour_offset}",
         )
-        if created_at <= now - timedelta(hours=24):
+        if created_at < now - timedelta(hours=24):
             eligible_ids.append(prediction_id)
 
     async def price_fetcher(symbol: str, asset_type: str) -> float | None:

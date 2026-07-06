@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
@@ -27,6 +26,8 @@ class RepositoryHistoricalPriceFetcher:
         self._finnhub_api_key = (finnhub_api_key or os.getenv("FINNHUB_API_KEY", "")).strip() or None
         self._coin_id_cache: dict[str, str | None] = {}
         self._price_cache: dict[tuple[str, str, str], float | None] = {}
+        self._coingecko_min_interval_seconds = 1.5
+        self._last_coingecko_request_monotonic: float | None = None
 
     async def __call__(self, symbol: str, asset_type: str, target_at: datetime) -> float | None:
         target_date = target_at.astimezone(UTC).date().isoformat()
@@ -74,7 +75,19 @@ class RepositoryHistoricalPriceFetcher:
         coin_id = await self._coin_id_for_symbol(symbol)
         if not coin_id:
             return None
+        await self._respect_coingecko_rate_limit()
         return await _fetch_coingecko_crypto_close(coin_id, target_at)
+
+    async def _respect_coingecko_rate_limit(self) -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        if self._last_coingecko_request_monotonic is not None:
+            elapsed = now - self._last_coingecko_request_monotonic
+            wait_seconds = self._coingecko_min_interval_seconds - elapsed
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+                now = loop.time()
+        self._last_coingecko_request_monotonic = now
 
     async def _coin_id_for_symbol(self, symbol: str) -> str | None:
         symbol_upper = symbol.upper()
@@ -182,42 +195,86 @@ def _download_yfinance_stock_close(symbol: str, target_at: datetime) -> float | 
 
 
 async def _fetch_coingecko_crypto_close(coin_id: str, target_at: datetime) -> float | None:
-    try:
-        now = datetime.now(UTC)
-        days = max(7, math.ceil((now - target_at).total_seconds() / 86400) + 7)
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(
-                f"{COINGECKO_BASE}/coins/{coin_id}/ohlc",
-                params={"vs_currency": "usd", "days": days},
-            )
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:
-        logger.warning(
-            "Historical CoinGecko lookup failed for %s at %s",
-            coin_id,
-            target_at.date().isoformat(),
-            exc_info=True,
-        )
-        return None
+    date_param = target_at.astimezone(UTC).strftime("%d-%m-%Y")
+    max_retries = 3
 
-    if not isinstance(payload, list):
-        return None
-
-    timestamps: list[int] = []
-    closes: list[float] = []
-    for candle in payload:
-        if not isinstance(candle, list) or len(candle) < 5:
-            continue
+    for attempt in range(max_retries):
         try:
-            timestamps.append(int(candle[0]) // 1000)
-            closes.append(float(candle[4]))
-        except (TypeError, ValueError):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"{COINGECKO_BASE}/coins/{coin_id}/history",
+                    params={
+                        "date": date_param,
+                        "localization": "false",
+                    },
+                )
+        except Exception:
+            logger.warning(
+                "Historical CoinGecko lookup failed for %s at %s",
+                coin_id,
+                target_at.date().isoformat(),
+                exc_info=True,
+            )
+            return None
+
+        if response.status_code == 429:
+            if attempt == max_retries - 1:
+                logger.warning(
+                    "Historical CoinGecko lookup rate-limited for %s at %s after %s attempts: %s",
+                    coin_id,
+                    target_at.date().isoformat(),
+                    max_retries,
+                    response.text[:500],
+                )
+                return None
+            await asyncio.sleep(_coingecko_retry_delay_seconds(response, attempt))
             continue
 
-    if not timestamps:
-        return None
-    return _first_daily_close_on_or_after(target_at.date(), timestamps=timestamps, closes=closes)
+        if response.status_code >= 400:
+            logger.warning(
+                "Historical CoinGecko lookup failed for %s at %s with status %s: %s",
+                coin_id,
+                target_at.date().isoformat(),
+                response.status_code,
+                response.text[:500],
+            )
+            return None
+
+        try:
+            payload = response.json()
+        except Exception:
+            logger.warning(
+                "Historical CoinGecko lookup returned invalid JSON for %s at %s: %s",
+                coin_id,
+                target_at.date().isoformat(),
+                response.text[:500],
+                exc_info=True,
+            )
+            return None
+
+        market_data = payload.get("market_data")
+        if not isinstance(market_data, dict):
+            return None
+        current_price = market_data.get("current_price")
+        if not isinstance(current_price, dict):
+            return None
+        usd_price = current_price.get("usd")
+        try:
+            return None if usd_price is None else float(usd_price)
+        except (TypeError, ValueError):
+            return None
+
+    return None
+
+
+def _coingecko_retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            pass
+    return min(8.0, 1.5 * (2**attempt))
 
 
 def _first_daily_close_on_or_after(

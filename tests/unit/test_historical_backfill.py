@@ -326,3 +326,122 @@ async def test_repository_historical_price_fetcher_falls_back_after_finnhub_403(
     price = await fetcher("AAPL", "stock", target_at)
 
     assert price == 111.0
+
+
+@pytest.mark.asyncio
+async def test_coingecko_history_endpoint_parses_usd_price(
+    backfill_db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_at = datetime(2026, 3, 23, 12, 0, tzinfo=UTC)
+    captured_urls: list[str] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+        async def get(self, url: str, params: dict[str, object] | None = None) -> httpx.Response:
+            request = httpx.Request("GET", url, params=params)
+            captured_urls.append(str(request.url))
+            return httpx.Response(
+                200,
+                request=request,
+                json={"market_data": {"current_price": {"usd": 123.45}}},
+            )
+
+    monkeypatch.setattr(historical_backfill.httpx, "AsyncClient", _FakeAsyncClient)
+
+    price = await historical_backfill._fetch_coingecko_crypto_close("bitcoin", target_at)
+
+    assert price == 123.45
+    assert captured_urls == [
+        "https://api.coingecko.com/api/v3/coins/bitcoin/history?date=23-03-2026&localization=false"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_coingecko_429_retries_are_bounded(
+    backfill_db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_at = datetime(2026, 3, 23, 12, 0, tzinfo=UTC)
+    attempts = {"count": 0}
+    sleep_calls: list[float] = []
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            del exc_type, exc, tb
+
+        async def get(self, url: str, params: dict[str, object] | None = None) -> httpx.Response:
+            del params
+            attempts["count"] += 1
+            request = httpx.Request("GET", url)
+            return httpx.Response(
+                429,
+                request=request,
+                headers={"Retry-After": "0"},
+                json={
+                    "status": {
+                        "error_code": 429,
+                        "error_message": "rate limited",
+                    }
+                },
+            )
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(historical_backfill.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(historical_backfill.asyncio, "sleep", fake_sleep)
+
+    price = await historical_backfill._fetch_coingecko_crypto_close("bitcoin", target_at)
+
+    assert price is None
+    assert attempts["count"] == 3
+    assert sleep_calls == [0.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_render_symbol_is_not_auto_populated_with_guessed_coingecko_id(
+    backfill_db: Database,
+) -> None:
+    async with aiosqlite.connect(backfill_db.db_path) as connection:
+        await connection.execute(
+            """
+            INSERT INTO watchlist (
+                symbol,
+                asset_type,
+                display_name,
+                is_active,
+                coingecko_id
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            ("RENDER", "crypto", "Render", 1, None),
+        )
+        await connection.commit()
+
+    fetcher = historical_backfill.RepositoryHistoricalPriceFetcher(db_path=backfill_db.db_path)
+    price = await fetcher("RENDER", "crypto", _fixture_now())
+
+    assert price is None
+
+    async with aiosqlite.connect(backfill_db.db_path) as connection:
+        cursor = await connection.execute(
+            "SELECT coingecko_id FROM watchlist WHERE symbol = ?",
+            ("RENDER",),
+        )
+        row = await cursor.fetchone()
+
+    assert row == (None,)
