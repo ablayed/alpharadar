@@ -414,34 +414,42 @@ async def test_coingecko_429_retries_are_bounded(
 
 
 @pytest.mark.asyncio
-async def test_render_symbol_is_not_auto_populated_with_guessed_coingecko_id(
+async def test_render_prediction_resolves_via_rndr_watchlist_alias_without_renaming_data(
     backfill_db: Database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async with aiosqlite.connect(backfill_db.db_path) as connection:
         await connection.execute(
             """
-            INSERT INTO watchlist (
-                symbol,
-                asset_type,
-                display_name,
-                is_active,
-                coingecko_id
-            ) VALUES (?, ?, ?, ?, ?)
+            UPDATE watchlist
+            SET display_name = ?, is_active = 1, coingecko_id = ?
+            WHERE symbol = ? AND asset_type = 'crypto'
             """,
-            ("RENDER", "crypto", "Render", 1, None),
+            ("Render", "render-token", "RNDR"),
         )
         await connection.commit()
+
+    async def fake_coingecko_close(coin_id: str, target_at: datetime) -> float | None:
+        assert coin_id == "render-token"
+        assert target_at == _fixture_now()
+        return 7.89
+
+    async def fake_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(historical_backfill, "_fetch_coingecko_crypto_close", fake_coingecko_close)
+    monkeypatch.setattr(historical_backfill.asyncio, "sleep", fake_sleep)
 
     fetcher = historical_backfill.RepositoryHistoricalPriceFetcher(db_path=backfill_db.db_path)
     price = await fetcher("RENDER", "crypto", _fixture_now())
 
-    assert price is None
+    assert price == 7.89
 
     async with aiosqlite.connect(backfill_db.db_path) as connection:
         cursor = await connection.execute(
-            "SELECT coingecko_id FROM watchlist WHERE symbol = ?",
-            ("RENDER",),
+            "SELECT symbol, coingecko_id FROM watchlist WHERE symbol = ?",
+            ("RNDR",),
         )
         row = await cursor.fetchone()
 
-    assert row == (None,)
+    assert row == ("RNDR", "render-token")

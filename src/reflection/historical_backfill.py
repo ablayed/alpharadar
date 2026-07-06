@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 import aiosqlite
 import httpx
 
+from src.data.aggregator import CRYPTO_SYMBOL_ALIASES
 from src.ta.candles import COINGECKO_BASE, FINNHUB_BASE
 
 HistoricalPriceFetcher = Callable[[str, str, datetime], Awaitable[float | None]]
@@ -94,31 +95,43 @@ class RepositoryHistoricalPriceFetcher:
         if symbol_upper in self._coin_id_cache:
             return self._coin_id_cache[symbol_upper]
 
+        candidate_symbols = [symbol_upper]
+        canonical_symbol = CRYPTO_SYMBOL_ALIASES.get(symbol_upper)
+        if canonical_symbol is not None and canonical_symbol not in candidate_symbols:
+            candidate_symbols.append(canonical_symbol)
+
         async with aiosqlite.connect(self._db_path) as connection:
-            cursor = await connection.execute(
-                """
-                SELECT coingecko_id
-                FROM watchlist
-                WHERE symbol = ? AND asset_type = 'crypto' AND is_active = 1 AND coingecko_id IS NOT NULL
-                LIMIT 1
-                """,
-                (symbol_upper,),
-            )
-            row = await cursor.fetchone()
-            if row is None:
+            row = None
+            for candidate_symbol in candidate_symbols:
                 cursor = await connection.execute(
                     """
                     SELECT coingecko_id
-                    FROM hot_list
-                    WHERE symbol = ? AND coingecko_id IS NOT NULL
-                    ORDER BY
-                        CASE WHEN status = 'active' THEN 0 ELSE 1 END,
-                        added_at DESC
+                    FROM watchlist
+                    WHERE symbol = ? AND asset_type = 'crypto' AND is_active = 1 AND coingecko_id IS NOT NULL
                     LIMIT 1
                     """,
-                    (symbol_upper,),
+                    (candidate_symbol,),
                 )
                 row = await cursor.fetchone()
+                if row is not None:
+                    break
+            if row is None:
+                for candidate_symbol in candidate_symbols:
+                    cursor = await connection.execute(
+                        """
+                        SELECT coingecko_id
+                        FROM hot_list
+                        WHERE symbol = ? AND coingecko_id IS NOT NULL
+                        ORDER BY
+                            CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                            added_at DESC
+                        LIMIT 1
+                        """,
+                        (candidate_symbol,),
+                    )
+                    row = await cursor.fetchone()
+                    if row is not None:
+                        break
 
         coin_id = None if row is None or row[0] is None else str(row[0])
         self._coin_id_cache[symbol_upper] = coin_id

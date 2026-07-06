@@ -59,7 +59,7 @@ async def test_open_ended_window_catches_all_ages(db) -> None:
     eligible_ids: list[int] = []
 
     for hour_offset in range(30):
-        created_at = now - timedelta(hours=hour_offset)
+        created_at = now - timedelta(hours=hour_offset, minutes=5)
         prediction_id = await _insert_prediction(
             db.db_path,
             created_at=created_at,
