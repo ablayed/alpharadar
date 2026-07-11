@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+import math
 import sqlite3
 import tempfile
 from collections import Counter
@@ -21,6 +23,9 @@ from src.reflection.tracker import (
     _update_prediction,
     build_outcome_passes,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -163,6 +168,23 @@ async def _run_backfill_passes(
         pass_summary.scanned = len(rows)
 
         for row in rows:
+            raw_predicted_price = row["price_at_prediction"]
+            try:
+                predicted_price = float(raw_predicted_price)
+            except (TypeError, ValueError):
+                predicted_price = None
+
+            if predicted_price is None or not math.isfinite(predicted_price) or predicted_price <= 0:
+                pass_summary.skipped["invalid_price_at_prediction"] += 1
+                logger.warning(
+                    "Skipping historical outcome backfill for prediction id=%s symbol=%s: "
+                    "invalid_price_at_prediction (value=%r)",
+                    row["id"],
+                    row["symbol"],
+                    raw_predicted_price,
+                )
+                continue
+
             created_at = _parse_created_at(row["created_at"]) if "created_at" in row.keys() else None
             if created_at is None:
                 async with aiosqlite.connect(db_path) as connection:
@@ -185,7 +207,6 @@ async def _run_backfill_passes(
                 continue
 
             predicted_direction = _normalize_prediction_direction(str(row["predicted_direction"]))
-            predicted_price = float(row["price_at_prediction"])
             change_pct = round(((historical_price - predicted_price) / predicted_price) * 100, 2)
             actual_direction = _direction_from_change(change_pct, neutral_band=outcome_pass.neutral_band)
 

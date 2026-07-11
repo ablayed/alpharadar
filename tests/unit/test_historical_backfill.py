@@ -298,6 +298,64 @@ async def test_historical_backfill_live_writes_expected_values_and_is_idempotent
 
 
 @pytest.mark.asyncio
+async def test_historical_backfill_skips_zero_price_and_continues(
+    backfill_db: Database,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = _fixture_now()
+    kishu_id = await _insert_prediction(
+        backfill_db.db_path,
+        created_at=now - timedelta(days=2),
+        symbol="KISHU",
+        price_at_prediction=0.0,
+    )
+    doge_id = await _insert_prediction(
+        backfill_db.db_path,
+        created_at=now - timedelta(days=2),
+        symbol="DOGE",
+    )
+
+    async def historical_price_fetcher(symbol: str, asset_type: str, target_at: datetime) -> float | None:
+        del asset_type, target_at
+        return {"KISHU": 0.000000001, "DOGE": 110.0}[symbol]
+
+    with caplog.at_level("WARNING"):
+        summary = await backfill_historical_outcomes(
+            db_path=backfill_db.db_path,
+            historical_price_fetcher=historical_price_fetcher,
+            dry_run=False,
+            now=now,
+        )
+
+    assert summary.to_dict()["passes"]["1d"] == {
+        "scanned": 2,
+        "resolved": 1,
+        "skipped": {"invalid_price_at_prediction": 1},
+    }
+    assert any(
+        f"id={kishu_id}" in record.message
+        and "symbol=KISHU" in record.message
+        and "invalid_price_at_prediction" in record.message
+        for record in caplog.records
+    )
+
+    async with aiosqlite.connect(backfill_db.db_path) as connection:
+        cursor = await connection.execute(
+            "SELECT actual_price_1d, outcome_recorded FROM predictions WHERE id = ?",
+            (kishu_id,),
+        )
+        kishu_row = await cursor.fetchone()
+        cursor = await connection.execute(
+            "SELECT actual_price_1d, actual_change_1d_pct, outcome_recorded FROM predictions WHERE id = ?",
+            (doge_id,),
+        )
+        doge_row = await cursor.fetchone()
+
+    assert kishu_row == (None, 0)
+    assert doge_row == (110.0, 10.0, 1)
+
+
+@pytest.mark.asyncio
 async def test_repository_historical_price_fetcher_falls_back_after_finnhub_403(
     backfill_db: Database,
     monkeypatch: pytest.MonkeyPatch,
