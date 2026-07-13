@@ -63,6 +63,7 @@ def _create_support_tables(connection: sqlite3.Connection) -> None:
             source TEXT,
             prediction_ts TEXT,
             raw_probability REAL,
+            horizon TEXT,
             entry_price REAL
         )
         """
@@ -215,6 +216,7 @@ def _load_forensic_support_tables(connection: sqlite3.Connection) -> None:
             source,
             prediction_ts,
             raw_probability,
+            horizon,
             entry_price
         ) VALUES (
             :id,
@@ -222,6 +224,7 @@ def _load_forensic_support_tables(connection: sqlite3.Connection) -> None:
             :source,
             :prediction_ts,
             :raw_probability,
+            :horizon,
             :entry_price
         )
         """,

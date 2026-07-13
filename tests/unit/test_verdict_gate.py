@@ -150,3 +150,43 @@ def test_verdict_marks_thin_source_and_horizon_slices_as_insufficient_sample(tmp
     assert result["verdict"] != "INSUFFICIENT_DATA"
     assert "- thin_source: insufficient_sample (resolved_rows=12)" in text
     assert "- 3d: insufficient_sample (resolved_rows=12)" in text
+
+
+def test_verdict_reports_directional_bias_and_ignores_neutral_blended_accuracy(tmp_path: Path) -> None:
+    db_path = tmp_path / "directional_bias.db"
+    out_path = tmp_path / "audit_verdict.md"
+    _create_db(db_path)
+
+    rows: list[dict[str, Any]] = []
+    identifier = 1
+    distributions = (
+        ("BULLISH", 34, 17),
+        ("BEARISH", 30, 12),
+        ("NEUTRAL", 36, 30),
+    )
+    for direction, count, wins in distributions:
+        for index in range(count):
+            rows.append(
+                {
+                    "migrated_from_v1_id": identifier,
+                    "source": "directional_fixture",
+                    "symbol": f"FIX{identifier}",
+                    "direction": direction,
+                    "resolved": 1,
+                    "outcome_label": int(index < wins),
+                    "horizon": "1d",
+                }
+            )
+            identifier += 1
+    _insert_prediction_event_rows(db_path, rows)
+
+    result = generate(db_path=str(db_path), out=str(out_path))
+    text = out_path.read_text(encoding="utf-8")
+
+    assert result["verdict"] == "SIGNAL_WEAK"
+    assert "## Directional Bias & NEUTRAL Impact" in text
+    assert "- BULLISH-only accuracy: 50.0% (n=34)." in text
+    assert "- BEARISH-only accuracy: 40.0% (n=30)." in text
+    assert "- NEUTRAL-only blended score (non-directional; deprecated): 83.3% (n=36)." in text
+    assert "- Directional-only accuracy (BULLISH/BEARISH): 45.3% (n=64)." in text
+    assert "all eligible sources remain below random on directional-only accuracy, with no inversion evidence" in text

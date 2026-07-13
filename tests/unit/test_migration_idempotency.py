@@ -114,16 +114,21 @@ def test_migrate_v1_predictions_idempotent(tmp_path: Path) -> None:
     _build_legacy_predictions_db(db_path)
 
     first_result = migrate_v1_predictions(str(db_path))
-    assert first_result.inserted_rows == 2
+    assert first_result.inserted_rows == 4
+    assert first_result.inserted_rows_by_horizon == {"1d": 2, "5d": 2}
 
     connection = sqlite3.connect(db_path)
     try:
         first_count = connection.execute("SELECT COUNT(*) FROM prediction_events").fetchone()[0]
+        five_day_count = connection.execute(
+            "SELECT COUNT(*) FROM prediction_events WHERE horizon = '5d'"
+        ).fetchone()[0]
     finally:
         connection.close()
 
     second_result = migrate_v1_predictions(str(db_path))
     assert second_result.inserted_rows == 0
+    assert second_result.skipped_existing_rows_by_horizon == {"1d": 2, "5d": 2}
 
     connection = sqlite3.connect(db_path)
     try:
@@ -131,4 +136,5 @@ def test_migrate_v1_predictions_idempotent(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    assert first_count == second_count == 2
+    assert first_count == second_count == 4
+    assert five_day_count == 2

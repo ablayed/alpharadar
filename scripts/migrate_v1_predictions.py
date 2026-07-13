@@ -10,10 +10,11 @@ from typing import Any
 from app.audit.cost_model import resolve_round_trip_cost_bps
 
 MIGRATION_SQL_PATH = Path(__file__).resolve().parents[1] / "migrations" / "000_phase0_event_tables.sql"
-SUPPORTED_HORIZONS = ("1d", "3d", "7d")
+SUPPORTED_HORIZONS = ("1d", "3d", "5d", "7d")
 HORIZON_COLUMNS: dict[str, tuple[str, str, str]] = {
     "1d": ("actual_price_1d", "actual_change_1d_pct", "is_correct_1d"),
     "3d": ("actual_price_3d", "actual_change_3d_pct", "is_correct_3d"),
+    "5d": ("actual_price_5d", "actual_change_5d_pct", "is_correct_5d"),
     "7d": ("actual_price_7d", "actual_change_7d_pct", "is_correct_7d"),
 }
 
@@ -23,6 +24,8 @@ class MigrationResult:
     predictions_seen: int = 0
     inserted_rows: int = 0
     skipped_existing_rows: int = 0
+    inserted_rows_by_horizon: dict[str, int] = field(default_factory=dict)
+    skipped_existing_rows_by_horizon: dict[str, int] = field(default_factory=dict)
     skipped_missing_horizon_columns: dict[str, int] = field(default_factory=dict)
     skipped_row_errors: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -247,8 +250,14 @@ def migrate_v1_predictions(db_path: str) -> MigrationResult:
                 cursor = connection.execute(insert_sql, event_row)
                 if cursor.rowcount == 1:
                     result.inserted_rows += 1
+                    result.inserted_rows_by_horizon[horizon] = (
+                        result.inserted_rows_by_horizon.get(horizon, 0) + 1
+                    )
                 else:
                     result.skipped_existing_rows += 1
+                    result.skipped_existing_rows_by_horizon[horizon] = (
+                        result.skipped_existing_rows_by_horizon.get(horizon, 0) + 1
+                    )
 
         connection.commit()
         return result
@@ -270,7 +279,12 @@ def main(argv: list[str] | None = None, *, db_path: str | None = None) -> int:
     result = migrate_v1_predictions(db_path)
     print(f"predictions_seen={result.predictions_seen}")
     print(f"inserted_rows={result.inserted_rows}")
+    print(f"inserted_rows_by_horizon={json.dumps(result.inserted_rows_by_horizon, sort_keys=True)}")
     print(f"skipped_existing_rows={result.skipped_existing_rows}")
+    print(
+        "skipped_existing_rows_by_horizon="
+        f"{json.dumps(result.skipped_existing_rows_by_horizon, sort_keys=True)}"
+    )
     if result.skipped_missing_horizon_columns:
         print(f"skipped_missing_horizon_columns={json.dumps(result.skipped_missing_horizon_columns, sort_keys=True)}")
     for note in result.notes:

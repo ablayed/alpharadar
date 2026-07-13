@@ -5,7 +5,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from app.audit.forensic import check_inversion_by_source, run_forensic_audit
+from app.audit.forensic import (
+    DIRECTION_BEARISH,
+    DIRECTION_BULLISH,
+    DIRECTION_NEUTRAL,
+    DIRECTIONAL_DIRECTIONS,
+    check_inversion_by_source,
+    run_forensic_audit,
+)
 from app.reporting.ev_metrics import DEFAULT_WINDOW_DAYS, compute_group_metrics, load_prediction_event_rows, summarize_rows
 
 MIN_RESOLVED_ROWS = 100
@@ -92,7 +99,64 @@ def _select_verdict(*, bug_indicators: int, positive_signal_indicators: int) -> 
     return "MIXED"
 
 
-def _root_cause_lines() -> list[str]:
+def _format_accuracy(accuracy: float | None, sample_size: int) -> str:
+    if accuracy is None:
+        return f"n/a (n={sample_size})"
+    return f"{accuracy * 100.0:.1f}% (n={sample_size})"
+
+
+def _directional_bias_lines(rows: list[dict[str, Any]]) -> list[str]:
+    lines = ["## Directional Bias & NEUTRAL Impact"]
+    sources = sorted({str(row.get("source") or "unknown") for row in rows})
+    if not sources:
+        return [*lines, "- No resolved prediction_events found."]
+
+    for source in sources:
+        source_rows = [row for row in rows if str(row.get("source") or "unknown") == source]
+        bullish_rows = [
+            row for row in source_rows if str(row.get("direction") or "").upper() == DIRECTION_BULLISH
+        ]
+        bearish_rows = [
+            row for row in source_rows if str(row.get("direction") or "").upper() == DIRECTION_BEARISH
+        ]
+        neutral_rows = [
+            row for row in source_rows if str(row.get("direction") or "").upper() == DIRECTION_NEUTRAL
+        ]
+        directional_rows = [
+            row
+            for row in source_rows
+            if str(row.get("direction") or "").upper() in DIRECTIONAL_DIRECTIONS
+        ]
+        bullish_summary = summarize_rows(bullish_rows)
+        bearish_summary = summarize_rows(bearish_rows)
+        neutral_summary = summarize_rows(neutral_rows)
+        directional_summary = summarize_rows(directional_rows)
+        lines.extend(
+            [
+                f"### {source}",
+                f"- BULLISH-only accuracy: {_format_accuracy(bullish_summary['accuracy'], int(bullish_summary['sample_size']))}.",
+                f"- BEARISH-only accuracy: {_format_accuracy(bearish_summary['accuracy'], int(bearish_summary['sample_size']))}.",
+                (
+                    "- NEUTRAL-only blended score (non-directional; deprecated): "
+                    f"{_format_accuracy(neutral_summary['accuracy'], int(neutral_summary['sample_size']))}."
+                ),
+                (
+                    "- Directional-only accuracy (BULLISH/BEARISH): "
+                    f"{_format_accuracy(directional_summary['accuracy'], int(directional_summary['sample_size']))}."
+                ),
+            ]
+        )
+    return lines
+
+
+def _root_cause_lines(resolved_rows: list[dict[str, Any]]) -> list[str]:
+    horizon_summaries = []
+    for horizon in sorted({str(row.get("horizon") or "unknown") for row in resolved_rows}):
+        summary = summarize_rows([row for row in resolved_rows if str(row.get("horizon") or "unknown") == horizon])
+        horizon_summaries.append(
+            f"{horizon} = {_format_accuracy(summary['accuracy'], int(summary['sample_size']))}"
+        )
+    reproduced_accuracy = "; ".join(horizon_summaries) if horizon_summaries else "no resolved rows"
     return [
         "## Root Cause Findings (informational, does not override sample-size gate)",
         (
@@ -100,11 +164,7 @@ def _root_cause_lines() -> list[str]:
             "which permanently missed predictions created outside that band. Block A.3 replaces that behavior "
             "with an open-ended age cutoff for ongoing resolution."
         ),
-        (
-            "- Historical reference figures `37.3%`, `33.3%`, `29.6%`, and `99 resolved` could not be verified "
-            "from this repository's current database, self-report tables, or discovery hits. They should be "
-            "treated as unverifiable rather than as audit ground truth."
-        ),
+        f"- Reproduced resolved accuracy by horizon (computed from the current database): {reproduced_accuracy}.",
         "- This section is documentation only. It does not bypass the INSUFFICIENT_DATA floor or alter verdict assignment logic.",
     ]
 
@@ -121,6 +181,7 @@ def generate(
     resolved_row_count = len(resolved_rows)
     source_breakdown = _count_by(resolved_rows, "source")
     horizon_breakdown = _count_by(resolved_rows, "horizon")
+    directional_bias_lines = _directional_bias_lines(resolved_rows)
 
     if resolved_row_count < MIN_RESOLVED_ROWS:
         markdown = "\n".join(
@@ -140,7 +201,9 @@ def generate(
                 "## Horizon Breakdown",
                 *_breakdown_lines(horizon_breakdown, include_status=False),
                 "",
-                *_root_cause_lines(),
+                *directional_bias_lines,
+                "",
+                *_root_cause_lines(resolved_rows),
             ]
         )
         output_path = Path(out)
@@ -167,7 +230,9 @@ def generate(
     high_confidence_summary = summarize_rows(high_confidence_rows)
     inversion_sources = check_inversion_by_source(resolved_rows)["sources"]
     eligible_inversion_sources = [
-        source for source in inversion_sources if int(source["sample_size"]) >= MIN_SLICE_RESOLVED_ROWS
+        source
+        for source in inversion_sources
+        if int(source["directional_sample_size"]) >= MIN_SLICE_RESOLVED_ROWS
     ]
 
     top_bucket_status: bool | str
@@ -247,6 +312,12 @@ def generate(
     top_bucket_net_ev = None if top_bucket_metric is None else top_bucket_metric["net_ev_pct"]
     top_bucket_sample_size = 0 if top_bucket_metric is None else int(top_bucket_metric["sample_size"])
     auto_trade_scan_sample_size = 0 if auto_trade_scan_metric is None else int(auto_trade_scan_metric["sample_size"])
+    all_directional_sources_below_random_without_inversion = bool(eligible_inversion_sources) and all(
+        source["directional_accuracy"] is not None
+        and float(source["directional_accuracy"]) < 0.5
+        and source["likely_bug"] is not True
+        for source in eligible_inversion_sources
+    )
 
     markdown = "\n".join(
         [
@@ -285,6 +356,8 @@ def generate(
             "## Horizon Slice Readiness",
             *_breakdown_lines(horizon_breakdown, include_status=True),
             "",
+            *directional_bias_lines,
+            "",
             "## Supporting Evidence",
             (
                 f"- Ordering violations: {len(findings['checks']['ordering']['violations'])}. "
@@ -292,14 +365,24 @@ def generate(
                 f"Duplicate pairs: {findings['checks']['duplicates']['duplicate_pair_count']}."
             ),
             (
-                f"- Neutral audit: {findings['checks']['neutral_audit'].get('missed_explosive_count', 0)} "
-                f"missed explosive moves out of {findings['checks']['neutral_audit'].get('neutral_count', 0)} neutral calls."
+                f"- Neutral audit: neutral_count = {findings['checks']['neutral_audit'].get('neutral_count', 0)}; "
+                f"missed_explosive_count = {findings['checks']['neutral_audit'].get('missed_explosive_count', 0)}; "
+                f"missed_explosive_rate = {findings['checks']['neutral_audit'].get('missed_explosive_rate')}; "
+                f"average_absolute_future_move = {findings['checks']['neutral_audit'].get('average_absolute_future_move')}; "
+                f"median_absolute_future_move = {findings['checks']['neutral_audit'].get('median_absolute_future_move')}."
+            ),
+            (
+                "- Directional-signal assessment: all eligible sources remain below random on directional-only "
+                "accuracy, with no inversion evidence; the system has weak directional signal and requires the "
+                "v2 EV-gated rebuild."
+                if all_directional_sources_below_random_without_inversion
+                else "- Directional-signal assessment: see directional-only source metrics above; NEUTRAL blended scores are diagnostic only."
             ),
             (
                 f"- Survivorship check: {findings['checks']['survivorship']['finding']}."
             ),
             "",
-            *_root_cause_lines(),
+            *_root_cause_lines(resolved_rows),
         ]
     )
 

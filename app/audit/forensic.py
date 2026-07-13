@@ -5,11 +5,18 @@ import json
 import sqlite3
 from collections import defaultdict
 from datetime import UTC, datetime
+from statistics import median
 from typing import Any
 
 from app.reporting.ev_metrics import DEFAULT_WINDOW_DAYS, load_prediction_event_rows, query_group_metrics
 
 EXPLOSIVE_MOVE_PCT = 5.0
+DIRECTION_BULLISH = "BULLISH"
+DIRECTION_BEARISH = "BEARISH"
+DIRECTION_NEUTRAL = "NEUTRAL"
+DIRECTIONAL_DIRECTIONS = frozenset({DIRECTION_BULLISH, DIRECTION_BEARISH})
+INVERSION_MIN_SAMPLE_SIZE = 30
+INVERSION_ACCURACY_DISTANCE = 0.15
 
 
 def _optional_float(value: object) -> float | None:
@@ -82,30 +89,50 @@ def check_ordering(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def check_inversion_by_source(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    grouped: dict[str, list[int]] = defaultdict(list)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         source = str(row.get("source") or "unknown")
-        outcome_label = _optional_int(row.get("outcome_label"))
-        if outcome_label is not None:
-            grouped[source].append(outcome_label)
+        grouped[source].append(row)
 
     sources: list[dict[str, Any]] = []
     for source in sorted(grouped):
-        labels = grouped[source]
-        sample_size = len(labels)
-        accuracy = sum(labels) / sample_size if sample_size else None
-        inverted_accuracy = (1.0 - accuracy) if accuracy is not None else None
+        source_rows = grouped[source]
+        blended_labels = [
+            label
+            for row in source_rows
+            if (label := _optional_int(row.get("outcome_label"))) is not None
+        ]
+        directional_labels = [
+            label
+            for row in source_rows
+            if str(row.get("direction") or "").upper() in DIRECTIONAL_DIRECTIONS
+            and (label := _optional_int(row.get("outcome_label"))) is not None
+        ]
+        directional_sample_size = len(directional_labels)
+        directional_accuracy = (
+            sum(directional_labels) / directional_sample_size if directional_sample_size else None
+        )
+        directional_inverted_accuracy = (
+            1.0 - directional_accuracy if directional_accuracy is not None else None
+        )
+        blended_sample_size = len(blended_labels)
+        blended_accuracy = sum(blended_labels) / blended_sample_size if blended_sample_size else None
         likely_bug: bool | str
-        if sample_size < 30:
+        if directional_sample_size < INVERSION_MIN_SAMPLE_SIZE:
             likely_bug = "insufficient_sample"
         else:
-            likely_bug = bool(accuracy is not None and abs(accuracy - 0.5) >= 0.15)
+            likely_bug = bool(
+                directional_accuracy is not None
+                and abs(directional_accuracy - 0.5) >= INVERSION_ACCURACY_DISTANCE
+            )
         sources.append(
             {
                 "source": source,
-                "sample_size": sample_size,
-                "accuracy": accuracy,
-                "inverted_accuracy": inverted_accuracy,
+                "directional_sample_size": directional_sample_size,
+                "directional_accuracy": directional_accuracy,
+                "directional_inverted_accuracy": directional_inverted_accuracy,
+                "blended_sample_size": blended_sample_size,
+                "blended_accuracy": blended_accuracy,
                 "likely_bug": likely_bug,
             }
         )
@@ -186,18 +213,37 @@ def check_neutral_audit(
     *,
     explosive_move_pct: float = EXPLOSIVE_MOVE_PCT,
 ) -> dict[str, Any]:
-    neutral_rows = [row for row in rows if str(row.get("direction") or "").upper() == "NEUTRAL"]
-    missed_ids = [
-        _optional_int(row.get("id"))
-        for row in neutral_rows
-        if (move := _optional_float(row.get("actual_move_pct_within_horizon"))) is not None
-        and abs(move) >= explosive_move_pct
+    neutral_rows = [
+        row for row in rows if str(row.get("direction") or "").upper() == DIRECTION_NEUTRAL
     ]
+    absolute_moves: list[float] = []
+    missed_ids: list[int | None] = []
+    for row in neutral_rows:
+        move = _optional_float(row.get("actual_move_pct_within_horizon"))
+        if move is None:
+            entry_price = _optional_float(row.get("entry_price"))
+            resolution_price = _optional_float(row.get("resolution_price"))
+            if entry_price not in (None, 0.0) and resolution_price is not None:
+                move = ((resolution_price - entry_price) / entry_price) * 100.0
+        if move is None:
+            continue
+        absolute_move = abs(move)
+        absolute_moves.append(absolute_move)
+        if absolute_move >= explosive_move_pct:
+            missed_ids.append(_optional_int(row.get("id")))
+
+    missed_explosive_count = len(missed_ids)
+    neutral_count = len(neutral_rows)
     return {
         "check": "neutral_audit",
-        "neutral_count": len(neutral_rows),
-        "missed_explosive_count": len(missed_ids),
+        "neutral_count": neutral_count,
+        "missed_explosive_count": missed_explosive_count,
+        "missed_explosive_rate": missed_explosive_count / neutral_count if neutral_count else None,
         "missed_ids": missed_ids,
+        "average_absolute_future_move": (
+            sum(absolute_moves) / len(absolute_moves) if absolute_moves else None
+        ),
+        "median_absolute_future_move": median(absolute_moves) if absolute_moves else None,
         "explosive_move_pct": explosive_move_pct,
     }
 
@@ -210,6 +256,7 @@ def check_duplicates(rows: list[dict[str, Any]]) -> dict[str, Any]:
             row.get("source"),
             row.get("prediction_ts") or row.get("ts"),
             row.get("raw_probability"),
+            row.get("horizon"),
         )
         row_id = _optional_int(row.get("id"))
         if row_id is not None:
@@ -222,6 +269,7 @@ def check_duplicates(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "source": key[1],
                 "prediction_ts": key[2],
                 "raw_probability": key[3],
+                "horizon": key[4],
             },
             "ids": ids,
         }
@@ -311,20 +359,15 @@ def run_forensic_audit(
                     "source": row.get("source"),
                     "ts": row.get("ts"),
                     "raw_probability": row.get("raw_probability"),
+                    "horizon": row.get("horizon"),
                 }
                 for row in prediction_event_rows
             ]
         duplicate_result = check_duplicates(duplicate_rows)
 
         if not neutral_rows:
-            neutral_result = {
-                "check": "neutral_audit",
-                "neutral_count": 0,
-                "missed_explosive_count": 0,
-                "missed_ids": [],
-                "explosive_move_pct": EXPLOSIVE_MOVE_PCT,
-                "status": "unavailable",
-            }
+            neutral_result = check_neutral_audit(prediction_event_rows)
+            neutral_result["status"] = "derived_from_prediction_events"
         else:
             neutral_result = check_neutral_audit(neutral_rows)
             neutral_result["status"] = "ok"

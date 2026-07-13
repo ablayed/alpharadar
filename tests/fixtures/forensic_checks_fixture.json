@@ -7,8 +7,8 @@
     {"id": 9002, "prediction_price": 100.00, "stored_prediction_price_from_candle": 100.02, "resolution_price": 104.50, "candle_close_price": 104.50}
   ],
   "duplicate_rows": [
-    {"id": 9003, "symbol": "ADAUSDT", "source": "trade", "prediction_ts": "2026-05-03T08:00:00Z", "raw_probability": 0.62, "entry_price": 0.450},
-    {"id": 9004, "symbol": "ADAUSDT", "source": "trade", "prediction_ts": "2026-05-03T08:00:00Z", "raw_probability": 0.62, "entry_price": 0.451}
+    {"id": 9003, "symbol": "ADAUSDT", "source": "trade", "prediction_ts": "2026-05-03T08:00:00Z", "raw_probability": 0.62, "horizon": "1d", "entry_price": 0.450},
+    {"id": 9004, "symbol": "ADAUSDT", "source": "trade", "prediction_ts": "2026-05-03T08:00:00Z", "raw_probability": 0.62, "horizon": "1d", "entry_price": 0.451}
   ],
   "neutral_audit_rows": [
     {"id": 9101, "symbol": "BTCUSDT", "direction": "NEUTRAL", "horizon": "1d", "actual_move_pct_within_horizon": 7.2},

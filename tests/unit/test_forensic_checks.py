@@ -38,22 +38,63 @@ def test_ordering_check_flags_bad_row() -> None:
 def test_inversion_check_flags_likely_bug() -> None:
     fixture = _load_json(FORENSIC_FIXTURE_PATH)
     assert isinstance(fixture, dict)
-    result = check_inversion_by_source(fixture["briefing_test_rows"])
+    rows = [{**row, "direction": "BULLISH"} for row in fixture["briefing_test_rows"]]
+    result = check_inversion_by_source(rows)
     source_result = result["sources"][0]
-    assert set(source_result) == {"source", "sample_size", "accuracy", "inverted_accuracy", "likely_bug"}
-    assert source_result["sample_size"] == 40
-    assert source_result["accuracy"] == pytest.approx(0.25, abs=1e-6)
+    assert set(source_result) == {
+        "source",
+        "directional_sample_size",
+        "directional_accuracy",
+        "directional_inverted_accuracy",
+        "blended_sample_size",
+        "blended_accuracy",
+        "likely_bug",
+    }
+    assert source_result["directional_sample_size"] == 40
+    assert source_result["directional_accuracy"] == pytest.approx(0.25, abs=1e-6)
+    assert source_result["blended_accuracy"] == pytest.approx(0.25, abs=1e-6)
     assert source_result["likely_bug"] is True
 
 
 def test_inversion_check_insufficient_sample() -> None:
     fixture = _load_json(FORENSIC_FIXTURE_PATH)
     assert isinstance(fixture, dict)
-    result = check_inversion_by_source(fixture["new_source_test_rows"])
+    rows = [{**row, "direction": "BEARISH"} for row in fixture["new_source_test_rows"]]
+    result = check_inversion_by_source(rows)
     source_result = result["sources"][0]
-    assert source_result["sample_size"] == 12
-    assert source_result["accuracy"] == pytest.approx(2 / 12, abs=1e-6)
+    assert source_result["directional_sample_size"] == 12
+    assert source_result["directional_accuracy"] == pytest.approx(2 / 12, abs=1e-6)
     assert source_result["likely_bug"] == "insufficient_sample"
+
+
+def test_inversion_check_excludes_neutral_rows_from_likely_bug() -> None:
+    rows = [
+        {"source": "neutral_blended", "direction": "BULLISH", "outcome_label": int(index < 15)}
+        for index in range(30)
+    ] + [
+        {"source": "neutral_blended", "direction": "NEUTRAL", "outcome_label": 0}
+        for _ in range(40)
+    ]
+
+    source_result = check_inversion_by_source(rows)["sources"][0]
+
+    assert source_result["directional_sample_size"] == 30
+    assert source_result["directional_accuracy"] == pytest.approx(0.5, abs=1e-6)
+    assert source_result["blended_accuracy"] == pytest.approx(15 / 70, abs=1e-6)
+    assert source_result["likely_bug"] is False
+
+
+def test_inversion_check_keeps_fifteen_point_threshold() -> None:
+    rows = [
+        {"source": "threshold", "direction": "BEARISH", "outcome_label": int(index < 14)}
+        for index in range(40)
+    ]
+
+    source_result = check_inversion_by_source(rows)["sources"][0]
+
+    assert source_result["directional_accuracy"] == pytest.approx(0.35, abs=1e-6)
+    assert source_result["directional_sample_size"] == 40
+    assert source_result["likely_bug"] is True
 
 
 def test_price_source_check_a() -> None:
@@ -90,6 +131,9 @@ def test_neutral_audit_counts_missed_moves() -> None:
     result = check_neutral_audit(fixture["neutral_audit_rows"])
     assert result["neutral_count"] == 4
     assert result["missed_explosive_count"] == 2
+    assert result["missed_explosive_rate"] == pytest.approx(0.5, abs=1e-6)
+    assert result["average_absolute_future_move"] == pytest.approx(4.45, abs=1e-6)
+    assert result["median_absolute_future_move"] == pytest.approx(4.55, abs=1e-6)
 
 
 def test_duplicate_check_finds_exact_pair() -> None:
@@ -98,6 +142,32 @@ def test_duplicate_check_finds_exact_pair() -> None:
     result = check_duplicates(fixture["duplicate_rows"])
     assert result["duplicate_pair_count"] == 1
     assert result["duplicate_pairs"][0]["ids"] == [9003, 9004]
+    assert result["duplicate_pairs"][0]["key"]["horizon"] == "1d"
+
+
+def test_duplicate_check_does_not_flag_multi_horizon_rows() -> None:
+    rows = [
+        {
+            "id": 1,
+            "symbol": "BTCUSDT",
+            "source": "briefing",
+            "prediction_ts": "2026-05-03T08:00:00Z",
+            "raw_probability": 0.62,
+            "horizon": "1d",
+        },
+        {
+            "id": 2,
+            "symbol": "BTCUSDT",
+            "source": "briefing",
+            "prediction_ts": "2026-05-03T08:00:00Z",
+            "raw_probability": 0.62,
+            "horizon": "5d",
+        },
+    ]
+
+    result = check_duplicates(rows)
+
+    assert result["duplicate_pair_count"] == 0
 
 
 def test_survivorship_degraded_mode(tmp_path: Path) -> None:
