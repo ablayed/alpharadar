@@ -12,6 +12,7 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 COPY scripts/ scripts/
+COPY app/ app/
 
 RUN mkdir -p data logs models
 
