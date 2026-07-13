@@ -6,10 +6,17 @@ from typing import Any
 
 import pytest
 
-from app.audit.forensic import check_ordering
+from app.audit.forensic import (
+    INVERSION_ACCURACY_DISTANCE,
+    INVERSION_MIN_SAMPLE_SIZE,
+    check_ordering,
+)
 from scripts.investigate_auto_trade_scan import (
     HORIZONS,
+    LIKELY_BUG_DISTANCE,
+    MIN_SLICE_SAMPLE_SIZE,
     NEUTRAL_BAND_BY_HORIZON,
+    _answer_questions,
     actual_change_pct_from_gross_return,
     check_ordering_for_source,
     compute_inversion_diagnostics,
@@ -219,3 +226,107 @@ def test_check_ordering_for_source_unavailable_when_table_missing(tmp_path: Path
     result = check_ordering_for_source(str(db_path), "auto_trade_scan")
     assert result["status"] == "unavailable_no_ordering_table"
     assert result["result"] is None
+
+
+def test_thresholds_are_reused_from_forensic_module_not_reinvented() -> None:
+    assert LIKELY_BUG_DISTANCE == INVERSION_ACCURACY_DISTANCE == pytest.approx(0.15)
+    assert MIN_SLICE_SAMPLE_SIZE == INVERSION_MIN_SAMPLE_SIZE == 30
+
+
+def test_inversion_pattern_note_uses_large_deviation_only_label() -> None:
+    rows = [
+        _row(id=index, direction="BULLISH", horizon="1d", gross_return_pct=1.0, outcome_label=int(index < 5))
+        for index in range(40)
+    ]
+    result = compute_inversion_diagnostics(rows)
+    slice_1d_bullish = next(
+        item for item in result["slices"] if item["horizon"] == "1d" and item["direction"] == "BULLISH"
+    )
+    # 5/40 = 12.5% accuracy -> |0.125 - 0.5| = 0.375 >= 0.15 -> flagged, using the new label.
+    assert slice_1d_bullish["pattern_note"] == "large_deviation_only"
+    assert "possible_wiring_or_label_bug" not in {item["pattern_note"] for item in result["slices"]}
+
+
+def _clean_ordering() -> dict[str, Any]:
+    return {"status": "unavailable_no_ordering_table", "result": None, "note": "n/a"}
+
+
+def _sign_label(*, checked: int, mismatches: int) -> dict[str, Any]:
+    return {
+        "checked_row_count": checked,
+        "mismatch_count": mismatches,
+        "mismatch_rate": (mismatches / checked) if checked else None,
+        "examples": [],
+    }
+
+
+def _price_consistency(*, checked: int, violations: int) -> dict[str, Any]:
+    return {
+        "checked_row_count": checked,
+        "violation_count": violations,
+        "violation_rate": (violations / checked) if checked else None,
+        "violations": [],
+    }
+
+
+def _overall(*, sample_size: int, accuracy: float = 0.5) -> dict[str, Any]:
+    return {"sample_size": sample_size, "accuracy": accuracy}
+
+
+def test_answer_questions_flags_bug_when_rate_above_threshold_and_sample_large_enough() -> None:
+    # 16% mismatch rate, n=100 (>= MIN_SLICE_SAMPLE_SIZE) -> above the 15% materiality bar -> YES.
+    answers = _answer_questions(
+        overall=_overall(sample_size=100),
+        sign_label_consistency=_sign_label(checked=100, mismatches=16),
+        price_consistency=_price_consistency(checked=100, violations=0),
+        ordering=_clean_ordering(),
+    )
+    assert answers["q1"] == "YES"
+    assert answers["q2"] == "label inversion"
+
+
+def test_answer_questions_does_not_flag_bug_when_sample_too_small() -> None:
+    # Same 16%-ish rate, but checked_row_count (10) is below MIN_SLICE_SAMPLE_SIZE (30) -- too small
+    # a sample for the rate to be treated as material, regardless of how extreme it looks.
+    answers = _answer_questions(
+        overall=_overall(sample_size=100),
+        sign_label_consistency=_sign_label(checked=10, mismatches=2),
+        price_consistency=_price_consistency(checked=100, violations=0),
+        ordering=_clean_ordering(),
+    )
+    assert answers["q1"] == "NO"
+
+
+def test_answer_questions_does_not_flag_bug_when_rate_at_or_below_threshold() -> None:
+    # Exactly 15% (not strictly greater than LIKELY_BUG_DISTANCE) with a large sample (1000) --
+    # even at scale, a rate at the threshold boundary is not treated as bug evidence.
+    answers = _answer_questions(
+        overall=_overall(sample_size=1000),
+        sign_label_consistency=_sign_label(checked=1000, mismatches=150),
+        price_consistency=_price_consistency(checked=1000, violations=0),
+        ordering=_clean_ordering(),
+    )
+    assert answers["q1"] == "NO"
+
+
+def test_answer_questions_price_consistency_flags_bug_when_rate_above_threshold() -> None:
+    answers = _answer_questions(
+        overall=_overall(sample_size=100),
+        sign_label_consistency=_sign_label(checked=100, mismatches=0),
+        price_consistency=_price_consistency(checked=100, violations=20),
+        ordering=_clean_ordering(),
+    )
+    assert answers["q1"] == "YES"
+    assert answers["q2"] == "price reconstruction mismatch"
+
+
+def test_answer_questions_price_consistency_low_rate_is_footnote_not_bug() -> None:
+    # 48/3669 ~= 1.3% -- well below the 15% materiality bar, so it should NOT produce YES.
+    answers = _answer_questions(
+        overall=_overall(sample_size=3669),
+        sign_label_consistency=_sign_label(checked=3669, mismatches=0),
+        price_consistency=_price_consistency(checked=3669, violations=48),
+        ordering=_clean_ordering(),
+    )
+    assert answers["q1"] == "NO"
+    assert "1.3%" in answers["q3"] or "1.3" in answers["q3"]

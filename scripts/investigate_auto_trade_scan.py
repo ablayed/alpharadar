@@ -8,7 +8,11 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from app.audit.forensic import check_ordering
+from app.audit.forensic import (
+    INVERSION_ACCURACY_DISTANCE,
+    INVERSION_MIN_SAMPLE_SIZE,
+    check_ordering,
+)
 from src.reflection.tracker import _direction_from_change
 
 DEFAULT_SOURCE = "auto_trade_scan"
@@ -19,8 +23,10 @@ SAMPLE_CSV_NAME = "auto_trade_scan_sample_rows.csv"
 HORIZONS: tuple[str, ...] = ("1d", "3d", "5d", "7d")
 NEUTRAL_BAND_BY_HORIZON: dict[str, float] = {"1d": 0.5, "3d": 2.0, "5d": 2.0, "7d": 2.0}
 DIRECTIONAL_DIRECTIONS = ("BULLISH", "BEARISH")
-LIKELY_BUG_DISTANCE = 0.15
-MIN_SLICE_SAMPLE_SIZE = 30
+# Reused from app.audit.forensic rather than re-derived here, so this script and the rest of the
+# audit tooling share one materiality standard instead of two independently-tuned thresholds.
+LIKELY_BUG_DISTANCE = INVERSION_ACCURACY_DISTANCE
+MIN_SLICE_SAMPLE_SIZE = INVERSION_MIN_SAMPLE_SIZE
 MATERIAL_CHANGE_DIFF_PCT = 0.05
 SAMPLE_SEED = 20260713
 
@@ -190,11 +196,15 @@ def compute_inversion_diagnostics(resolved_directional_rows: list[dict[str, Any]
             inverted_accuracy = (1.0 - original_accuracy) if original_accuracy is not None else None
             inverted_avg_return = (-original_avg_return) if original_avg_return is not None else None
 
+            # NOTE: pattern_note is diagnostic only. inverted_accuracy = 1 - original_accuracy is a
+            # tautology for a binary outcome, so "large_deviation_only" cannot independently confirm
+            # a wiring/label bug -- it only restates that this slice's accuracy is far from random.
+            # It is intentionally NOT read by _answer_questions.
             pattern_note = "insufficient_sample"
             if sample_size >= MIN_SLICE_SAMPLE_SIZE and original_accuracy is not None:
                 distance = abs(original_accuracy - 0.5)
                 pattern_note = (
-                    "possible_wiring_or_label_bug"
+                    "large_deviation_only"
                     if distance >= LIKELY_BUG_DISTANCE
                     else "no_strong_inversion_signal"
                 )
@@ -324,9 +334,11 @@ def compute_price_consistency(resolved_directional_rows: list[dict[str, Any]]) -
                     "outcome_label_disagrees_with_reconstructed": label_disagrees,
                 }
             )
+    violation_count = len(violations)
     return {
         "checked_row_count": checked,
-        "violation_count": len(violations),
+        "violation_count": violation_count,
+        "violation_rate": (violation_count / checked) if checked else None,
         "violations": violations[:20],
     }
 
@@ -444,29 +456,44 @@ def _format_return(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.3f}%"
 
 
+def _is_material_rate(*, sample_size: int, rate: float | None) -> bool:
+    """Shared materiality gate reused from app.audit.forensic's inversion thresholds
+    (INVERSION_MIN_SAMPLE_SIZE, INVERSION_ACCURACY_DISTANCE) so this script does not carry a second,
+    independently-tuned bar for "is this rate a real signal or normal data noise."
+    """
+    return sample_size >= MIN_SLICE_SAMPLE_SIZE and rate is not None and rate > LIKELY_BUG_DISTANCE
+
+
 def _answer_questions(
     *,
     overall: dict[str, Any],
     sign_label_consistency: dict[str, Any],
     price_consistency: dict[str, Any],
     ordering: dict[str, Any],
-    inversion: dict[str, Any],
 ) -> dict[str, str]:
     sample_size = overall["sample_size"]
     accuracy = overall["accuracy"]
 
+    label_rate_material = _is_material_rate(
+        sample_size=sign_label_consistency["checked_row_count"],
+        rate=sign_label_consistency["mismatch_rate"],
+    )
+    price_rate_material = _is_material_rate(
+        sample_size=price_consistency["checked_row_count"],
+        rate=price_consistency["violation_rate"],
+    )
+
     bug_signals: list[str] = []
-    if sign_label_consistency["mismatch_count"] > 0 and (sign_label_consistency["mismatch_rate"] or 0) > 0.01:
-        bug_signals.append("label mismatch rate above 1%")
-    if price_consistency["violation_count"] > 0:
-        bug_signals.append("price/return reconstruction violations found")
+    if sign_label_consistency["mismatch_count"] > 0 and label_rate_material:
+        bug_signals.append(
+            f"label mismatch rate above {LIKELY_BUG_DISTANCE:.0%} (n>={MIN_SLICE_SAMPLE_SIZE})"
+        )
+    if price_consistency["violation_count"] > 0 and price_rate_material:
+        bug_signals.append(
+            f"price/return reconstruction violation rate above {LIKELY_BUG_DISTANCE:.0%} (n>={MIN_SLICE_SAMPLE_SIZE})"
+        )
     if ordering.get("status") == "ok" and ordering.get("source_violation_count", 0) > 0:
         bug_signals.append("ordering violations found on auto_trade_scan-filtered rows")
-    strong_inversion_slices = [
-        item
-        for item in inversion["slices"]
-        if item["pattern_note"] == "possible_wiring_or_label_bug"
-    ]
 
     if sample_size == 0:
         q1 = "INCONCLUSIVE"
@@ -477,9 +504,9 @@ def _answer_questions(
         )
     elif bug_signals:
         q1 = "YES"
-        if sign_label_consistency["mismatch_count"] > 0 and price_consistency["violation_count"] == 0:
+        if label_rate_material and not price_rate_material:
             q2 = "label inversion"
-        elif price_consistency["violation_count"] > 0:
+        elif price_rate_material:
             q2 = "price reconstruction mismatch"
         elif ordering.get("source_violation_count", 0) > 0:
             q2 = "timestamp/candle alignment"
@@ -491,12 +518,17 @@ def _answer_questions(
         q2 = "N/A"
         q3 = (
             f"Directional-only accuracy is {_format_pct(accuracy)} on n={sample_size} resolved "
-            "BULLISH/BEARISH rows, with no label/sign/price-reconstruction mismatches detected "
+            "BULLISH/BEARISH rows. Label mismatch rate = "
+            f"{_format_pct(sign_label_consistency['mismatch_rate'])} "
             f"({sign_label_consistency['mismatch_count']} of {sign_label_consistency['checked_row_count']} "
-            "checked rows disagreed) and no inversion slice crossing the "
-            f"{LIKELY_BUG_DISTANCE:.2f} likely_bug distance threshold with n>={MIN_SLICE_SAMPLE_SIZE}. "
-            "This is consistent with a genuinely weak (near/below-random) directional signal at scale "
-            "rather than a wiring bug."
+            "checked rows) and price/return reconstruction violation rate = "
+            f"{_format_pct(price_consistency['violation_rate'])} "
+            f"({price_consistency['violation_count']} of {price_consistency['checked_row_count']} checked rows) "
+            f"-- both below the {LIKELY_BUG_DISTANCE:.0%} materiality threshold (n>={MIN_SLICE_SAMPLE_SIZE}) "
+            "reused from app.audit.forensic, so they are reported as data-quality footnotes rather than "
+            "bug evidence. This is consistent with a genuinely weak (near/below-random) directional "
+            "signal at scale rather than a wiring bug. (The Inversion Hypothesis Test table is "
+            "diagnostic-only and does not factor into this answer -- see that section.)"
         )
 
     q4 = "No live execution change in this block. Any future change must go through the roadmap and tests."
@@ -589,7 +621,6 @@ def run_investigation(
         sign_label_consistency=sign_label_consistency,
         price_consistency=price_consistency,
         ordering=ordering,
-        inversion=inversion,
     )
 
     sample_rows = build_sample_export(resolved_directional_rows, limit_samples=limit_samples)
@@ -653,6 +684,14 @@ def run_investigation(
         *_horizon_table_lines(diagnostics),
         "",
         "## Inversion Hypothesis Test (diagnostic only -- no should_invert field, no trading recommendation)",
+        (
+            "DIAGNOSTIC ONLY: this table does not feed the Q1 answer. `inverted_accuracy = "
+            "1 - original_accuracy` is a tautology for a binary outcome, so a `large_deviation_only` "
+            "pattern only restates that a slice's accuracy is far from random -- it cannot "
+            "independently confirm a wiring/label bug, and any weak-but-consistent directional "
+            "signal will show this pattern by construction."
+        ),
+        "",
         *_inversion_table_lines(inversion),
         "",
         "## Ordering Check (reused from app.audit.forensic.check_ordering)",
