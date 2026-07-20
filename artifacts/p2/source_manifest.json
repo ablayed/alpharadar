@@ -1,0 +1,19 @@
+{
+  "access_date": "2026-07-20",
+  "sources": [
+    {"kind": "Binance public-data documentation", "url": "https://github.com/binance/binance-public-data"},
+    {"kind": "Binance Spot archive", "url": "https://data.binance.vision/"},
+    {"kind": "Binance Spot REST market data", "url": "https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market"},
+    {"kind": "Binance delisting announcements", "url": "https://www.binance.com/en/support/announcement/list/161"},
+    {"kind": "CoinGecko API overview", "url": "https://docs.coingecko.com/reference/endpoint-overview"},
+    {"kind": "CoinGecko keyless public API", "url": "https://docs.coingecko.com/docs/keyless-public-api"},
+    {"kind": "CoinGecko historical coin data", "url": "https://docs.coingecko.com/reference/coins-id-history"},
+    {"kind": "AirDAO AMB full Spot delisting", "published_at": "2025-02-17T07:00:00Z", "url": "https://www.binance.com/en/support/announcement/detail/f3cc64a8758d4bb394e0830e5b31da97"},
+    {"kind": "Alpaca Finance ALPACA full Spot delisting", "published_at": "2025-04-24T04:00:00Z", "url": "https://www.binance.com/en/support/announcement/detail/0274f9d47da1437990bc13eb17b0ec99"},
+    {"kind": "Render RNDR to RENDER migration", "published_at": "2024-07-10T06:30:00Z", "url": "https://www.binance.com/en/support/announcement/detail/d1f2ae8d99b24439a7a900caa9bb6b3b"},
+    {"checksum_verified": true, "first_open_time_utc": "2024-07-01T00:00:00+00:00", "kind": "RNDRUSDT predecessor archive", "last_open_time_utc": "2024-07-22T02:00:00+00:00", "row_count": 507, "url": "https://data.binance.vision/data/spot/monthly/klines/RNDRUSDT/1h/RNDRUSDT-1h-2024-07.zip", "filename": "RNDRUSDT-1h-2024-07.zip", "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/RNDRUSDT/1h/RNDRUSDT-1h-2024-07.zip.CHECKSUM"},
+    {"kind": "Render migration completion", "published_at": "2024-07-26T09:00:00Z", "url": "https://www.binance.com/en/support/announcement/detail/7aa2bb48ab194bb9aebbc3f72b5819ed"},
+    {"kind": "Frontier FRONT to Self Chain SLF migration", "published_at": "2024-08-19T11:00:00Z", "url": "https://www.binance.com/en/support/announcement/detail/3ab5488a00e04d4fb338c77ea28326a8"},
+    {"kind": "Frontier migration completion", "published_at": "2024-08-30T10:00:00Z", "url": "https://www.binance.com/en/support/announcement/detail/65f69bc68ca64182b6df3d958f14f38e"}
+  ]
+}

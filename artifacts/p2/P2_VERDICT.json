@@ -1,0 +1,8 @@
+{
+  "verdict": "FEASIBLE_WITH_LIMITATIONS",
+  "scope": "Survivorship-aware Spot-long profitability research only; no strategy implemented.",
+  "basis": ["Verified 1h, 4h, and 1d official Spot archive samples with SHA-256 companions.", "Verified the 2025 archive timestamp-unit transition.", "A point-in-time Binance liquidity universe can use trailing archive facts without current-universe look-ahead."],
+  "lifecycle_evidence": "Two full Spot delistings and two Spot migrations are now corroborated by official Binance announcements and checksum-verified archive observations. Archive 404s remain supporting absence observations only.",
+  "limitations": ["Market-cap top-N is not accepted for the low-cost first pass: official CoinGecko historical access and inactive-asset mapping are keyed/plan-constrained.", "Klines do not supply historical spread, depth, or price impact.", "Archive absence alone cannot establish a delisting.", "Point-in-time token-level Sharia status cannot be reconstructed from current project sources."],
+  "planned_mitigations": ["Use trailing liquidity, listing-age, and completeness filters.", "Maintain a sourced lifecycle table and never stitch migrations without demonstrated economic continuity.", "Keep broad-universe research non-execution-eligible until a manually reviewed stable allowlist exists.", "Use canonical 1h and deterministic 4h/1d resampling."]
+}

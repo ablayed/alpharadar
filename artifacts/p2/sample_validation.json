@@ -1,0 +1,270 @@
+{
+  "access_date": "2026-07-20",
+  "lifecycle_gaps": {
+    "FRONTUSDT_TO_SLFUSDT": {
+      "announced_interruption_hours": 77,
+      "missing_bar_count": 77,
+      "open_time_delta_hours": 78
+    },
+    "RNDRUSDT_TO_RENDERUSDT": {
+      "announced_interruption_hours": 101,
+      "missing_bar_count": 101,
+      "open_time_delta_hours": 102
+    }
+  },
+  "validations": [
+    {
+      "anomalies": [],
+      "checksum_bytes": 91,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/ALPACAUSDT/1h/ALPACAUSDT-1h-2025-05.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2025-05-01T00:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2025-05-02T02:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2025-05",
+      "purpose": "Alpaca full-Spot-delisting predecessor",
+      "row_count": 27,
+      "symbol": "ALPACAUSDT",
+      "timestamp_units": [
+        "microseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/ALPACAUSDT/1h/ALPACAUSDT-1h-2025-05.zip",
+      "validation_error": null,
+      "zip_bytes": 1555,
+      "zip_member": "ALPACAUSDT-1h-2025-05.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 88,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/AMBUSDT/1h/AMBUSDT-1h-2025-02.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2025-02-01T00:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2025-02-24T02:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2025-02",
+      "purpose": "AirDAO full-Spot-delisting predecessor",
+      "row_count": 555,
+      "symbol": "AMBUSDT",
+      "timestamp_units": [
+        "microseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/AMBUSDT/1h/AMBUSDT-1h-2025-02.zip",
+      "validation_error": null,
+      "zip_bytes": 24519,
+      "zip_member": "AMBUSDT-1h-2025-02.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 88,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2024-12.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2024-12-01T00:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2024-12-31T23:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2024-12",
+      "purpose": "pre-2025 timestamp sample",
+      "row_count": 744,
+      "symbol": "BTCUSDT",
+      "timestamp_units": [
+        "milliseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2024-12.zip",
+      "validation_error": null,
+      "zip_bytes": 44271,
+      "zip_member": "BTCUSDT-1h-2024-12.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 88,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2025-01.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2025-01-01T00:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2025-01-31T23:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2025-01",
+      "purpose": "timestamp transition sample",
+      "row_count": 744,
+      "symbol": "BTCUSDT",
+      "timestamp_units": [
+        "microseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2025-01.zip",
+      "validation_error": null,
+      "zip_bytes": 44655,
+      "zip_member": "BTCUSDT-1h-2025-01.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 88,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/ETHUSDT/4h/ETHUSDT-4h-2025-01.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2025-01-01T00:00:00+00:00",
+      "interval": "4h",
+      "last_open_time_utc": "2025-01-31T20:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2025-01",
+      "purpose": "4h schema sample",
+      "row_count": 186,
+      "symbol": "ETHUSDT",
+      "timestamp_units": [
+        "microseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/ETHUSDT/4h/ETHUSDT-4h-2025-01.zip",
+      "validation_error": null,
+      "zip_bytes": 11437,
+      "zip_member": "ETHUSDT-4h-2025-01.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 90,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/FRONTUSDT/1h/FRONTUSDT-1h-2024-08.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2024-08-01T00:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2024-08-27T02:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2024-08",
+      "purpose": "Frontier migration predecessor",
+      "row_count": 627,
+      "symbol": "FRONTUSDT",
+      "timestamp_units": [
+        "milliseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/FRONTUSDT/1h/FRONTUSDT-1h-2024-08.zip",
+      "validation_error": null,
+      "zip_bytes": 25737,
+      "zip_member": "FRONTUSDT-1h-2024-08.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 90,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/KAITOUSDT/1h/KAITOUSDT-1h-2025-02.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2025-02-20T13:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2025-02-28T23:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2025-02",
+      "purpose": "recent listing first-month candidate",
+      "row_count": 203,
+      "symbol": "KAITOUSDT",
+      "timestamp_units": [
+        "microseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/KAITOUSDT/1h/KAITOUSDT-1h-2025-02.zip",
+      "validation_error": null,
+      "zip_bytes": 11018,
+      "zip_member": "KAITOUSDT-1h-2025-02.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 91,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/RENDERUSDT/1h/RENDERUSDT-1h-2024-07.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2024-07-26T08:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2024-07-31T23:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2024-07",
+      "purpose": "Render migration successor",
+      "row_count": 136,
+      "symbol": "RENDERUSDT",
+      "timestamp_units": [
+        "milliseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/RENDERUSDT/1h/RENDERUSDT-1h-2024-07.zip",
+      "validation_error": null,
+      "zip_bytes": 6575,
+      "zip_member": "RENDERUSDT-1h-2024-07.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 89,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/RNDRUSDT/1h/RNDRUSDT-1h-2024-07.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2024-07-01T00:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2024-07-22T02:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2024-07",
+      "purpose": "rebrand/migration predecessor",
+      "row_count": 507,
+      "symbol": "RNDRUSDT",
+      "timestamp_units": [
+        "milliseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/RNDRUSDT/1h/RNDRUSDT-1h-2024-07.zip",
+      "validation_error": null,
+      "zip_bytes": 24541,
+      "zip_member": "RNDRUSDT-1h-2024-07.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 88,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/SLFUSDT/1h/SLFUSDT-1h-2024-08.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2024-08-30T08:00:00+00:00",
+      "interval": "1h",
+      "last_open_time_utc": "2024-08-31T23:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2024-08",
+      "purpose": "Self Chain migration successor",
+      "row_count": 40,
+      "symbol": "SLFUSDT",
+      "timestamp_units": [
+        "milliseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/SLFUSDT/1h/SLFUSDT-1h-2024-08.zip",
+      "validation_error": null,
+      "zip_bytes": 2136,
+      "zip_member": "SLFUSDT-1h-2024-08.csv"
+    },
+    {
+      "anomalies": [],
+      "checksum_bytes": 88,
+      "checksum_ok": true,
+      "checksum_url": "https://data.binance.vision/data/spot/monthly/klines/SOLUSDT/1d/SOLUSDT-1d-2026-06.zip.CHECKSUM",
+      "download": true,
+      "duplicate_open_times": 0,
+      "first_open_time_utc": "2026-06-01T00:00:00+00:00",
+      "interval": "1d",
+      "last_open_time_utc": "2026-06-30T00:00:00+00:00",
+      "missing_expected_bars": 0,
+      "period": "2026-06",
+      "purpose": "latest completed monthly archive",
+      "row_count": 30,
+      "symbol": "SOLUSDT",
+      "timestamp_units": [
+        "microseconds"
+      ],
+      "url": "https://data.binance.vision/data/spot/monthly/klines/SOLUSDT/1d/SOLUSDT-1d-2026-06.zip",
+      "validation_error": null,
+      "zip_bytes": 1928,
+      "zip_member": "SOLUSDT-1d-2026-06.csv"
+    }
+  ]
+}

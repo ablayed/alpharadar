@@ -1,0 +1,15 @@
+{
+  "recommendation": "B_POINT_IN_TIME_BINANCE_LIQUIDITY_UNIVERSE",
+  "option_a_historical_market_cap": {
+    "binance_historical_market_cap": "NOT_PROVIDED_BY_BINANCE_ARCHIVES",
+    "coingecko": "Historical coin market-cap endpoints are documented, but current official documentation requires API-key routes for production-grade historical access and inactive-coin mapping. No key was requested or used.",
+    "assessment": "NOT_RECOMMENDED_FOR_LOW_COST_FIRST_PASS",
+    "risks": ["historical coin-id mapping", "ticker collisions", "rebrands", "inactive/dead assets", "rate/cost/reproducibility"]
+  },
+  "option_b_point_in_time_binance_liquidity": {
+    "assessment": "FEASIBLE_WITH_LIFECYCLE_CAVEATS",
+    "rebalance_inputs_known_at_time": ["Spot USDT archive existence", "minimum listing age from observed first candle", "trailing kline quote volume", "trailing number of trades", "data completeness", "trading continuity"],
+    "forbidden_inputs": ["current exchangeInfo", "future volume", "current universe membership"],
+    "lifecycle_validation": "Use official announcements where accessible; archive absence alone remains UNKNOWN."
+  }
+}

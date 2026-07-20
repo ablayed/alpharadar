@@ -1,0 +1,22 @@
+{
+  "as_of": "2026-07-20",
+  "period": "2019-01 through 2026-06 (90 completed months)",
+  "recommended_dataset": {
+    "universe": "approximately 50 point-in-time liquid Spot USDT pairs per month",
+    "canonical_interval": "1h",
+    "estimated_monthly_files": 4500,
+    "estimated_rows": 3348000,
+    "estimated_compressed_bytes": 157286400,
+    "estimated_uncompressed_bytes": 402653184,
+    "estimated_parquet_bytes": "150-300 MB",
+    "download_at_10_mbps": "approximately 3 minutes plus server/rate-limit overhead",
+    "parse_time": "approximately 2-10 minutes on local development hardware",
+    "incremental_monthly_cost": "about 50 files, 37,200 rows, 1.8 MB compressed at the stated sample-derived 35 KB/file assumption"
+  },
+  "optional_direct_archives": {
+    "4h": "about 840,000 rows; avoid by deterministic resampling from canonical 1h",
+    "1d": "about 135,000 rows; avoid by deterministic resampling from canonical 1h",
+    "aggTrades_or_trades": "not estimated as a required first-pass input; potentially orders of magnitude larger and unsuitable for this low-cost first pass"
+  },
+  "storage_choice": "SQLite is installed and adequate for metadata/audit; Parquet or DuckDB would be preferable for a future analytical dataset but neither should be added in P2. VPS and local development are suitable for the recommended scale."
+}

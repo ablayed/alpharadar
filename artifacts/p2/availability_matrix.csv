@@ -1,0 +1,17 @@
+bytes,download,interval,period,purpose,status,symbol,url
+41173,False,1h,2021-05,long-lived liquid altcoin,200,ADAUSDT,https://data.binance.vision/data/spot/monthly/klines/ADAUSDT/1h/ADAUSDT-1h-2021-05.zip
+1555,True,1h,2025-05,Alpaca full-Spot-delisting predecessor,200,ALPACAUSDT,https://data.binance.vision/data/spot/monthly/klines/ALPACAUSDT/1h/ALPACAUSDT-1h-2025-05.zip
+0,False,1h,2025-06,Alpaca post-cessation archive observation,404,ALPACAUSDT,https://data.binance.vision/data/spot/monthly/klines/ALPACAUSDT/1h/ALPACAUSDT-1h-2025-06.zip
+24519,True,1h,2025-02,AirDAO full-Spot-delisting predecessor,200,AMBUSDT,https://data.binance.vision/data/spot/monthly/klines/AMBUSDT/1h/AMBUSDT-1h-2025-02.zip
+0,False,1h,2025-03,AirDAO post-cessation archive observation,404,AMBUSDT,https://data.binance.vision/data/spot/monthly/klines/AMBUSDT/1h/AMBUSDT-1h-2025-03.zip
+44271,True,1h,2024-12,pre-2025 timestamp sample,200,BTCUSDT,https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2024-12.zip
+44655,True,1h,2025-01,timestamp transition sample,200,BTCUSDT,https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2025-01.zip
+0,True,1d,2025-04,pre-delisting continuity,404,DREPUSDT,https://data.binance.vision/data/spot/monthly/klines/DREPUSDT/1d/DREPUSDT-1d-2025-04.zip
+11437,True,4h,2025-01,4h schema sample,200,ETHUSDT,https://data.binance.vision/data/spot/monthly/klines/ETHUSDT/4h/ETHUSDT-4h-2025-01.zip
+25737,True,1h,2024-08,Frontier migration predecessor,200,FRONTUSDT,https://data.binance.vision/data/spot/monthly/klines/FRONTUSDT/1h/FRONTUSDT-1h-2024-08.zip
+11018,True,1h,2025-02,recent listing first-month candidate,200,KAITOUSDT,https://data.binance.vision/data/spot/monthly/klines/KAITOUSDT/1h/KAITOUSDT-1h-2025-02.zip
+1000,False,1d,2024-01,recent listing first-month candidate,200,MANTAUSDT,https://data.binance.vision/data/spot/monthly/klines/MANTAUSDT/1d/MANTAUSDT-1d-2024-01.zip
+6575,True,1h,2024-07,Render migration successor,200,RENDERUSDT,https://data.binance.vision/data/spot/monthly/klines/RENDERUSDT/1h/RENDERUSDT-1h-2024-07.zip
+24541,True,1h,2024-07,rebrand/migration predecessor,200,RNDRUSDT,https://data.binance.vision/data/spot/monthly/klines/RNDRUSDT/1h/RNDRUSDT-1h-2024-07.zip
+2136,True,1h,2024-08,Self Chain migration successor,200,SLFUSDT,https://data.binance.vision/data/spot/monthly/klines/SLFUSDT/1h/SLFUSDT-1h-2024-08.zip
+1928,True,1d,2026-06,latest completed monthly archive,200,SOLUSDT,https://data.binance.vision/data/spot/monthly/klines/SOLUSDT/1d/SOLUSDT-1d-2026-06.zip
