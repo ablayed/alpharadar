@@ -281,6 +281,10 @@ def generate_crypto_trade_signal(
     breakout_direction: str | None = None,
     breakout_description: str | None = None,
 ) -> TradeSignal | None:
+    if verdict is not None and verdict.prevailing_view == "neutral":
+        logger.info("NEUTRAL_EXCLUDED_FROM_EXECUTION: %s", symbol.upper())
+        return None
+
     factors: list[ConfluenceFactor] = []
 
     if ta_signal is not None:

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import aiosqlite
 import pytest
 
+from src.agents.state import DebateVerdict
+from src.bot import scheduler
 from src.bot.scheduler import setup_scheduler
+from src.reflection.tracker import PredictionTracker
 
 
 class _FakeJob:
@@ -106,3 +110,77 @@ async def test_setup_scheduler_registers_discovery_scans_for_630_london() -> Non
     assert {call["time"].hour for call in discovery_jobs} == {6, 18}
     assert all(call["time"].minute == 30 for call in discovery_jobs)
     assert all(getattr(call["time"].tzinfo, "key", None) == "Europe/London" for call in discovery_jobs)
+
+
+@pytest.mark.asyncio
+async def test_auto_trade_scan_keeps_neutral_prediction_history_but_promotes_no_trade(
+    db,
+    monkeypatch,
+) -> None:
+    tracker = PredictionTracker(db.db_path)
+    verdict = DebateVerdict(
+        symbol="ETH",
+        display_name="ETH",
+        prevailing_view="neutral",
+        confidence=0.9,
+        summary="Evidence is split.",
+        bull_thesis="Bull case",
+        bear_thesis="Bear case",
+        key_risk="Uncertain direction",
+        action_context="Wait for confirmation",
+    )
+    briefing_data = SimpleNamespace(
+        regime_state=SimpleNamespace(regime=SimpleNamespace(value="risk_on")),
+        crypto_prices=[SimpleNamespace(symbol="ETH", current_price=2_500.0, change_24h_pct=0.0)],
+        ta_signals={},
+        composite_scores={"ETH": SimpleNamespace(signal_breakdown={"sentiment": 0.2})},
+        funding={},
+        oi={},
+        cme_gap=None,
+        fear_greed=SimpleNamespace(signal="bullish", value=50, description="Constructive sentiment"),
+        dxy=None,
+        agent_analysis=SimpleNamespace(debate_verdicts=[verdict]),
+        event_data=[],
+    )
+
+    class FakeAggregator:
+        async def gather_briefing_data(self, *, include_agent_analysis: bool):
+            assert include_agent_analysis is True
+            await tracker.log_prediction(
+                symbol="ETH",
+                asset_type="crypto",
+                predicted_direction=verdict.prevailing_view,
+                confidence=verdict.confidence,
+                price_at_prediction=2_500.0,
+                source="analysis",
+                reasoning=verdict.summary,
+            )
+            return briefing_data
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.sent_messages: list[dict] = []
+
+        async def send_message(self, **kwargs) -> None:
+            self.sent_messages.append(kwargs)
+
+    monkeypatch.setattr(scheduler, "DataAggregator", FakeAggregator)
+    bot = FakeBot()
+    context = SimpleNamespace(
+        job=SimpleNamespace(data={"hour": 7, "minute": 0}),
+        bot_data={"aggregator": FakeAggregator(), "tracker": tracker, "db": db, "ml_ensemble": None},
+        bot=bot,
+        job_queue=None,
+    )
+
+    await scheduler.auto_trade_scan(context)
+
+    assert bot.sent_messages == []
+    async with aiosqlite.connect(db.db_path) as connection:
+        prediction_rows = await (await connection.execute(
+            "SELECT predicted_direction, source FROM predictions"
+        )).fetchall()
+        trade_log_rows = await (await connection.execute("SELECT id FROM trade_log")).fetchall()
+
+    assert prediction_rows == [("neutral", "analysis")]
+    assert trade_log_rows == []

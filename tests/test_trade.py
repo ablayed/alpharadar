@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
+import pytest
 
 from src.agents.state import DebateVerdict
 from src.data.derivatives import CMEGap, FundingData, OpenInterestData
@@ -495,6 +498,49 @@ def test_generate_crypto_trade_signal_builds_high_confluence_long_setup() -> Non
     assert signal.tp1 < signal.tp2 < signal.tp3
     assert signal.risk_reward >= 1.5
     assert len(signal.confluence_factors) == signal.confluence_count
+
+
+def test_generate_crypto_trade_signal_excludes_neutral_verdict_before_scoring(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="src.trade.generator"):
+        signal = generate_crypto_trade_signal(
+            symbol="ETH",
+            current_price=2_500.0,
+            ta_signal=_ta_signal(
+                symbol="ETH",
+                current_price=2_500.0,
+                atr_value=85.0,
+                atr_pct=3.4,
+                bb_upper=2_950.0,
+                bb_lower=2_250.0,
+                trend="strong_up",
+                overall_signal="buy",
+                confidence=0.78,
+                rsi_signal="oversold",
+                rsi_value=28.0,
+                macd_signal="bullish_cross",
+                macd_histogram=0.35,
+            ),
+            composite=_composite(
+                symbol="ETH",
+                score=0.25,
+                agreement=0.82,
+                direction="buy",
+                breakdown={"sentiment": 0.1, "ta": 0.08, "event": 0.05},
+            ),
+            verdict=_verdict(symbol="ETH", prevailing_view="neutral", confidence=0.9),
+            event_data={"event_type": "protocol_upgrade", "remaining_drift_pct": 4.5},
+            regime="risk_on",
+            btc_change_pct=2.8,
+            ml_prediction=_ml_prediction(symbol="ETH", direction="bullish", confidence=0.9),
+            breakout_score=90,
+            breakout_direction="long_setup",
+            breakout_description="Strong bullish breakout",
+        )
+
+    assert signal is None
+    assert "NEUTRAL_EXCLUDED_FROM_EXECUTION" in caplog.text
 
 
 def test_tp_caps_prevent_unrealistic_targets() -> None:
